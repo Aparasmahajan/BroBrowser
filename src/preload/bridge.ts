@@ -1,0 +1,129 @@
+import { contextBridge, ipcRenderer } from 'electron';
+import {
+  Channel,
+  Event,
+  type BroApi,
+  type NavigatePayload,
+  type TabState,
+  type AdblockStats,
+  type Bookmark,
+  type HistoryEntry,
+  type SearchConfig,
+  type FindResult,
+  type SavedSession,
+  type LibraryView,
+  type Prefs,
+  type ProfilesState,
+  type DownloadInfo,
+} from '../shared/ipc-contract';
+import type { ShortcutsState } from '../shared/shortcuts';
+
+function on<T>(channel: string, cb: (payload: T) => void): () => void {
+  const listener = (_e: unknown, payload: T) => cb(payload);
+  ipcRenderer.on(channel, listener);
+  return () => ipcRenderer.removeListener(channel, listener);
+}
+
+const api: BroApi = {
+  minimize: () => ipcRenderer.send(Channel.WindowMinimize),
+  toggleMaximize: () => ipcRenderer.send(Channel.WindowMaximizeToggle),
+  close: () => ipcRenderer.send(Channel.WindowClose),
+
+  setOpacity: (v) => ipcRenderer.send(Channel.SetOpacity, v),
+  getOpacity: () => ipcRenderer.invoke(Channel.GetOpacity),
+  setCaptureHidden: (h) => ipcRenderer.send(Channel.SetCaptureHidden, h),
+  getCaptureHidden: () => ipcRenderer.invoke(Channel.GetCaptureHidden),
+  setOverlayMode: (on) => ipcRenderer.send(Channel.SetOverlayMode, on),
+  getOverlayMode: () => ipcRenderer.invoke(Channel.GetOverlayMode),
+
+  newTab: (url) => ipcRenderer.send(Channel.TabNew, url),
+  closeTab: (id) => ipcRenderer.send(Channel.TabClose, id),
+  activateTab: (id) => ipcRenderer.send(Channel.TabActivate, id),
+  navigate: (input, id) => ipcRenderer.send(Channel.TabNavigate, { input, id } as NavigatePayload),
+  goBack: (id) => ipcRenderer.send(Channel.TabBack, id),
+  goForward: (id) => ipcRenderer.send(Channel.TabForward, id),
+  reload: (id) => ipcRenderer.send(Channel.TabReload, id),
+  stop: (id) => ipcRenderer.send(Channel.TabStop, id),
+  listTabs: () => ipcRenderer.invoke(Channel.TabList) as Promise<TabState[]>,
+
+  toggleSettings: () => ipcRenderer.send(Channel.SettingsToggle),
+  closeSettings: () => ipcRenderer.send(Channel.SettingsClose),
+  toggleLibrary: () => ipcRenderer.send(Channel.LibraryToggle),
+  closeLibrary: () => ipcRenderer.send(Channel.LibraryClose),
+
+  getAdblockStats: () => ipcRenderer.invoke(Channel.GetAdblockStats) as Promise<AdblockStats>,
+  setAdblockEnabled: (enabled) => ipcRenderer.send(Channel.SetAdblockEnabled, enabled),
+  reloadAdblock: () => ipcRenderer.send(Channel.ReloadAdblock),
+
+  getBookmarks: () => ipcRenderer.invoke(Channel.GetBookmarks) as Promise<Bookmark[]>,
+  toggleBookmark: (url, title) => ipcRenderer.send(Channel.ToggleBookmark, { url, title }),
+  removeBookmark: (url) => ipcRenderer.send(Channel.RemoveBookmark, url),
+
+  getHistory: () => ipcRenderer.invoke(Channel.GetHistory) as Promise<HistoryEntry[]>,
+  clearHistory: () => ipcRenderer.send(Channel.ClearHistory),
+
+  getShortcuts: () => ipcRenderer.invoke(Channel.GetShortcuts) as Promise<ShortcutsState>,
+  setShortcutKeys: (id, keys) => ipcRenderer.send(Channel.SetShortcutKeys, { id, keys }),
+  resetShortcuts: (id) => ipcRenderer.send(Channel.ResetShortcuts, id),
+  setGroupEnabled: (group, enabled) => ipcRenderer.send(Channel.SetGroupEnabled, { group, enabled }),
+  setMasterTargets: (groups) => ipcRenderer.send(Channel.SetMasterTargets, groups),
+  toggleMaster: () => ipcRenderer.send(Channel.ToggleMaster),
+  saveCustomShortcut: (s) => ipcRenderer.send(Channel.SaveCustomShortcut, s),
+  removeCustomShortcut: (id) => ipcRenderer.send(Channel.RemoveCustomShortcut, id),
+  setShortcutRecording: (on) => ipcRenderer.send(Channel.SetShortcutRecording, on),
+  runCommand: (id) => ipcRenderer.send(Channel.RunCommand, id),
+
+  getSearch: () => ipcRenderer.invoke(Channel.GetSearch) as Promise<SearchConfig>,
+  setSearch: (cfg) => ipcRenderer.send(Channel.SetSearch, cfg),
+
+  findInPage: (p) => ipcRenderer.send(Channel.FindInPage, p),
+  stopFind: () => ipcRenderer.send(Channel.FindStop),
+
+  getSessions: () => ipcRenderer.invoke(Channel.GetSessions) as Promise<SavedSession[]>,
+  saveSession: (name) => ipcRenderer.send(Channel.SaveSession, name),
+  openSession: (id) => ipcRenderer.send(Channel.OpenSession, id),
+  removeSession: (id) => ipcRenderer.send(Channel.RemoveSession, id),
+
+  getPrefs: () => ipcRenderer.invoke(Channel.GetPrefs) as Promise<Prefs>,
+  setPrefs: (p) => ipcRenderer.send(Channel.SetPrefs, p),
+  exportData: () => ipcRenderer.invoke(Channel.ExportData) as Promise<string | null>,
+  importData: () => ipcRenderer.invoke(Channel.ImportData) as Promise<string | null>,
+  clearCookies: () => ipcRenderer.invoke(Channel.ClearCookies) as Promise<void>,
+  clearCache: () => ipcRenderer.invoke(Channel.ClearCache) as Promise<void>,
+  getDataDir: () => ipcRenderer.invoke(Channel.GetDataDir) as Promise<string>,
+
+  getProfiles: () => ipcRenderer.invoke(Channel.GetProfiles) as Promise<ProfilesState>,
+  createProfile: (name, color) => ipcRenderer.invoke(Channel.CreateProfile, { name, color }) as Promise<string>,
+  updateProfile: (id, patch) => ipcRenderer.send(Channel.UpdateProfile, { id, ...patch }),
+  removeProfile: (id) => ipcRenderer.invoke(Channel.RemoveProfile, id) as Promise<boolean>,
+  newTabInProfile: (id) => ipcRenderer.send(Channel.NewTabInProfile, id),
+  showProfileMenu: () => ipcRenderer.send(Channel.ShowProfileMenu),
+
+  getDownloads: () => ipcRenderer.invoke(Channel.GetDownloads) as Promise<DownloadInfo[]>,
+  downloadAction: (id, action) => ipcRenderer.send(Channel.DownloadCommand, { id, action }),
+  clearDownloads: () => ipcRenderer.send(Channel.ClearDownloads),
+  chooseDownloadDir: () => ipcRenderer.invoke(Channel.ChooseDownloadDir) as Promise<string | null>,
+
+  onOpacityChanged: (cb) => on<number>(Event.OpacityChanged, cb),
+  onCaptureHiddenChanged: (cb) => on<boolean>(Event.CaptureHiddenChanged, cb),
+  onOverlayModeChanged: (cb) => on<boolean>(Event.OverlayModeChanged, cb),
+  onMaximizedChanged: (cb) => on<boolean>(Event.MaximizedChanged, cb),
+  onTabsChanged: (cb) => on<TabState[]>(Event.TabsChanged, cb),
+  onFocusOmnibox: (cb) => on<void>(Event.FocusOmnibox, () => cb()),
+  onAdblockStatsChanged: (cb) => on<AdblockStats>(Event.AdblockStatsChanged, cb),
+  onBookmarksChanged: (cb) => on<Bookmark[]>(Event.BookmarksChanged, cb),
+  onHistoryChanged: (cb) => on<HistoryEntry[]>(Event.HistoryChanged, cb),
+  onShortcutsChanged: (cb) => on<ShortcutsState>(Event.ShortcutsChanged, cb),
+  onSearchChanged: (cb) => on<SearchConfig>(Event.SearchChanged, cb),
+  onFindShow: (cb) => on<void>(Event.FindShow, () => cb()),
+  onFindResult: (cb) => on<FindResult>(Event.FindResult, cb),
+  onSessionsChanged: (cb) => on<SavedSession[]>(Event.SessionsChanged, cb),
+  onLibraryView: (cb) => on<LibraryView>(Event.LibraryView, cb),
+  onPrefsChanged: (cb) => on<Prefs>(Event.PrefsChanged, cb),
+  onProfilesChanged: (cb) => on<ProfilesState>(Event.ProfilesChanged, cb),
+  onDownloadsChanged: (cb) => on<DownloadInfo[]>(Event.DownloadsChanged, cb),
+
+  platform: process.platform,
+};
+
+contextBridge.exposeInMainWorld('bro', api);

@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>New Tab</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="start">
+    <main class="start-wrap">
+      <div class="logo">Bro</div>
+      <p class="tagline">Private browsing. Hidden from screen share.</p>
+      <div id="private-note" class="private-note" hidden>
+        <strong>You're in a private tab.</strong> Pages you visit here aren't saved to history or
+        restored next time, extensions are off, and cookies and site data are deleted when you
+        close your last private tab. Ads are still blocked. Sites, your employer or your network
+        can still see what you visit.
+      </div>
+
+      <form id="search-form" class="start-search" autocomplete="off">
+        <input
+          id="q"
+          type="text"
+          spellcheck="false"
+          placeholder="Search or type a URL — try “yt lofi”"
+          autofocus
+        />
+      </form>
+
+      <div class="shortcuts-grid">
+        <a class="shortcut" href="https://www.google.com">Google</a>
+        <a class="shortcut" href="https://www.youtube.com">YouTube</a>
+        <a class="shortcut" href="https://github.com">GitHub</a>
+      </div>
+
+      <p class="hint">
+        Press <kbd id="k">Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> for Settings ·
+        <kbd id="k2">Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>H</kbd> to toggle screen-share invisibility
+      </p>
+    </main>
+
+    <script>
+      // No privileged bridge on web content. We navigate to start.html?q=…;
+      // the main process intercepts that (tabs.ts, will-navigate) and resolves
+      // it with the user's search engines + keywords, same as the omnibox.
+      (function () {
+        var mac = navigator.platform.toLowerCase().indexOf('mac') === 0;
+        if (mac) { document.getElementById('k').textContent = 'Cmd'; document.getElementById('k2').textContent = 'Cmd'; }
+        if (/[?&]private=1/.test(window.location.search)) document.getElementById('private-note').hidden = false;
+
+        document.getElementById('search-form').addEventListener('submit', function (e) {
+          e.preventDefault();
+          var q = document.getElementById('q').value.trim();
+          if (q) window.location.href = window.location.pathname + '?q=' + encodeURIComponent(q);
+        });
+      })();
+    </script>
+  </body>
+</html>
