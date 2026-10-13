@@ -70,7 +70,7 @@ const PUBLIC_KEYS: (keyof OfflineItem)[] = [
 ];
 
 /** 'many': a single save turned out to be a whole course/playlist and was stopped. */
-type Outcome = 'ok' | 'none' | 'drm' | 'network' | 'live' | 'stopped' | 'error' | 'many';
+type Outcome = 'ok' | 'none' | 'network' | 'live' | 'stopped' | 'error' | 'many';
 
 /** The save running now: its process (yt-dlp/ffmpeg) and in-flight browser requests, for Pause/Cancel. */
 interface Job {
@@ -374,9 +374,7 @@ export class OfflineManager {
 
       const outcome = await this.fetchVideos(r, job);
       if (job.stopped || outcome === 'stopped') return;
-      if (outcome === 'drm') {
-        return this.fail(r, 'This video is DRM-protected (copy-protected), so it can’t be saved. Use the site’s own app to watch it offline.');
-      }
+
       if (outcome === 'network') return this.interrupted(r);
       if (outcome !== 'ok') {
         const why = r.error ?? NO_VIDEO;
@@ -419,7 +417,7 @@ export class OfflineManager {
         if (job.stopped) return 'stopped';
         r.error = undefined;
         const out = t.how === 'browser' ? await this.browserGrab(r, t.url, t.kind, job) : await this.ytdlpTries(r, t.url, t.page, cookies);
-        if (out === 'ok' || out === 'stopped' || out === 'drm') return out;
+        if (out === 'ok' || out === 'stopped') return out;
         seen.push(out);
         if (r.error) errors.push(r.error);
       }
@@ -450,7 +448,7 @@ export class OfflineManager {
       this.changed(true);
       const entry = await this.findEntry(r, url, cookies, impersonate);
       out = entry ? await this.ytdlp(r, entry, true, cookies, impersonate, true) : 'none';
-      if (out !== 'ok' && out !== 'stopped' && out !== 'network' && out !== 'drm') {
+      if (out !== 'ok' && out !== 'stopped' && out !== 'network') {
         out = 'none';
         r.error = undefined;
       }
@@ -680,7 +678,6 @@ export class OfflineManager {
         r.error = errors.at(-1);
         // Partial files stay for the retry after a network drop.
         if (looksOffline(all)) return resolve('network');
-        if (/DRM/i.test(all)) return void tidy('drm');
         if (/Unsupported URL|No video formats|Unable to extract|no suitable|no video|Requested format is not available/i.test(all) || !all) return void tidy('none');
         void tidy('error');
       });

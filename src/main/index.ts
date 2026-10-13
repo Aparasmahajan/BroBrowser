@@ -1,9 +1,13 @@
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, components } from 'electron';
 import { MainWindow } from './window';
 import { Browser } from './browser';
 import { registerIpc } from './ipc';
 import { buildMenu } from './menu';
 import { initAutoUpdate } from './updater';
+
+// Look like plain Chrome (as Brave does): sites such as Netflix and Google sign-in turn
+// away user agents carrying "Electron/…" or an unknown app token.
+app.userAgentFallback = app.userAgentFallback.replace(/ (Electron|bro-browser)\/\S+/g, '');
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -37,7 +41,17 @@ if (!gotLock) {
     }
   });
 
-  app.whenReady().then(() => {
+  const widevine = () =>
+    Promise.race([
+      components.whenReady().then(
+        () => undefined,
+        (e: unknown) => console.warn('[bro] Widevine not available:', e),
+      ),
+      new Promise<void>((r) => setTimeout(r, 15_000)),
+    ]);
+
+  app.whenReady().then(async () => {
+    await widevine();
     boot();
     initAutoUpdate();
     app.on('activate', () => {

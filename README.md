@@ -27,7 +27,7 @@ out of the box, and **supports Chrome Web Store extensions**.
 | **Private tabs** | Like Incognito: `Ctrl+Shift+N` or the button next to **+**. Private tabs share one in-memory storage area — cookies and site data are wiped when the last one closes. No history, never saved in sessions, links stay private, extensions off, ads still blocked. |
 | **Profiles** | Separate browsers inside Bro (e.g. Work / Personal): each has its own sign-ins and cookies, history, bookmarks and extensions. Profile button in the toolbar; tabs carry their profile's colour; links stay in their profile. |
 | **Downloads** | A download manager built in: big files come down over up to 16 parallel connections, every piece's progress is saved, so downloads survive pauses, network drops, crashes and restarts (and continue by themselves). Downloads list with Ctrl+J; pause/resume/cancel/retry/open/show in folder; choose folder, ask-where, connections in Settings. |
-| **Save for offline** | Ctrl+S (or the button next to Downloads, which lights up when a page plays a video) saves the page *and* its video for watching without internet: a page snapshot (`page.mhtml`), the video(s) as MP4, English subtitles, and an `index.html` player with speed buttons, resume-where-you-stopped and a lesson list. Works on YouTube and 1000s of sites (via yt-dlp), plain video files and HLS/DASH streams; anything a browser can't play is converted (ffmpeg). Whole playlists/courses, quality 360p–1080p or audio only, one save at a time, pause/resume, auto-retry on network loss, continues after a restart. Library → Offline. DRM-protected video can't be saved. |
+| **Save for offline** | Ctrl+S (or the button next to Downloads, which lights up when a page plays a video) saves the page *and* its video for watching without internet: a page snapshot (`page.mhtml`), the video(s) as MP4, English subtitles, and an `index.html` player with speed buttons, resume-where-you-stopped and a lesson list. Works on YouTube and 1000s of sites (via yt-dlp), plain video files and HLS/DASH streams; anything a browser can't play is converted (ffmpeg). Whole playlists/courses, quality 360p–1080p or audio only, one save at a time, pause/resume, auto-retry on network loss, continues after a restart. Library → Offline. DRM-protected video needs be saved. |
 | **Right-click menu** | Open link in new / private tab / another profile, Save link/image/page as, Copy image / link, search the selection, spelling suggestions, Inspect, extension items. |
 | **Sessions** | Reopens last time's tabs on launch (they load when clicked, so startup stays fast). Save all open tabs as a **named session** and reopen it later. |
 | **Find & zoom** | Find in page with match count; Chrome's zoom steps with a badge that resets on click; full screen, print, view source, DevTools. |
@@ -107,6 +107,23 @@ npm run dev        # build + launch with logging
 npm run typecheck  # tsc --noEmit (strict)
 ```
 
+### Netflix & other DRM video (Widevine)
+
+Bro runs on [castlabs' Electron build](https://github.com/castlabs/electron-releases), which
+adds Google's Widevine CDM (downloaded on first launch). Its `electron.exe` only carries a
+*development* VMP signature, and Netflix refuses that (titles fail with E100 / M7701-…). Sign it
+for production with a free castlabs EVS account, once per machine:
+
+```bash
+npm run vmp -- signup   # create the EVS account (e-mail + password, interactive)
+npm run vmp             # sign node_modules/electron/dist — redo after electron is reinstalled
+npm run vmp -- verify   # "development only" = not signed yet
+```
+
+The script uses `py`/`python` when there is one, otherwise sets up a private Python in
+`%LOCALAPPDATA%ro-devpython`. Packaging signs the app itself (`build/after-pack.cjs`);
+`BRO_SKIP_VMP=1` packs without signing.
+
 ### Packaging
 
 ```bash
@@ -115,7 +132,8 @@ npm run dist:win   # Windows NSIS installer + portable .exe
 npm run dist:mac   # macOS .dmg + .zip (must run on a Mac; signing/notarization via env)
 ```
 
-Config is in [`electron-builder.yml`](./electron-builder.yml). macOS notarization
+Config is in [`electron-builder.yml`](./electron-builder.yml). Packaging VMP-signs the app
+(needs the EVS account above, or `BRO_SKIP_VMP=1`). macOS notarization
 needs an Apple Developer account (`APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`,
 `APPLE_TEAM_ID` + flip `notarize`). Auto-update (`electron-updater`) reads the
 `publish` config — point it at your real release host before shipping. Add app

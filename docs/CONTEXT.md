@@ -6,7 +6,7 @@ Open work: [`TODO.md`](./TODO.md).
 
 ## What Bro is
 
-A Chromium-based desktop browser on **Electron 44.7.0** (TypeScript, esbuild,
+A Chromium-based desktop browser on **castlabs Electron 44.5.1+wvcus** (Electron + Widevine) (TypeScript, esbuild,
 no UI framework) whose window is **hidden from screen share** (`setContentProtection`)
 and can be **faded** (`setOpacity`). Windows 11 is the dev/target machine; macOS
 is supported by the code but not built here.
@@ -91,6 +91,18 @@ is supported by the code but not built here.
 - yt-dlp's catch-all extractors (`Generic`, `HTML5MediaEmbed`) title videos "<page> (1)", so
   only known sites rename a save to the video's own title.
 
+- **Widevine / Netflix:** `electron` is castlabs' build (installed from the release tarball URL in
+  package.json — npm can't reach it over git/ssh here; run `node node_modules/electron/install.js`
+  with `NODE_TLS_REJECT_UNAUTHORIZED=0` afterwards). `index.ts` waits for `components.whenReady()`
+  (max 15 s) before the window opens, else an early page sees no CDM (M7701-1003). Its exe has a
+  *development* VMP signature: Netflix requests a licence and gets an answer but never a key → E100.
+  Fix = production signing with castlabs EVS (`scripts/evs.mjs`, `npm run vmp`; needs the owner's EVS
+  account). Packaging: `electronDist` = node_modules/electron/dist, `afterPack` signs. Checked with
+  Shaka's Widevine demo (licence + decrypt OK) and Netflix's EME trace.
+- User agent: `app.userAgentFallback` drops the `Electron/…` and `bro-browser/…` tokens (plain Chrome
+  UA, as Brave does); Netflix and Google sign-in reject Electron UAs.
+- `npmRebuild: false` in electron-builder.yml: the native modules ship Node-API prebuilds; rebuilding
+  needs Visual Studio (absent here) and failed on `bufferutil`.
 - Torrents use **WebTorrent** (ESM-only → `external` in esbuild, loaded with `import()` on first use).
   Its WebRTC dependency `webrtc-polyfill` (native `node-datachannel`, fails to build here) is
   replaced by `stubs/webrtc-polyfill` through `overrides` in package.json — install with
@@ -138,6 +150,8 @@ pages on `--remote-debugging-port=9333`). Key tricks:
   `item.click()`. Mouse input via `sendInputEvent` is dropped while the screen is locked.
 - Downloads: `tests/e2e/fixtures/download-server.mjs` (ranges, throttle, flaky, bump).
   Point `downloadDir` at a temp folder during tests and reset `prefs.json` after.
+- Pages in hidden tabs pause video while the screen is locked ("video-only background media was
+  paused"). Test playback in an offscreen `BrowserWindow` from main instead.
 - `capturePage()` on the window is blank while screen-share hiding is on; capture
   individual views instead (and it fails while the screen is locked). An offscreen
   `BrowserWindow` (`webPreferences.offscreen: true`) still renders while locked.

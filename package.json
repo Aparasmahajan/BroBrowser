@@ -11,6 +11,7 @@
     "start": "npm run build && electron .",
     "dev": "npm run build && electron . --enable-logging",
     "typecheck": "tsc --noEmit",
+    "vmp": "node scripts/evs.mjs",
     "pack": "npm run build && electron-builder --dir",
     "dist": "npm run build && electron-builder",
     "dist:win": "npm run build && electron-builder --win",
@@ -18,7 +19,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.7.0",
-    "electron": "^44.7.0",
+    "electron": "https://github.com/castlabs/electron-releases/archive/refs/tags/v44.5.1%2Bwvcus.tar.gz",
     "electron-builder": "^25.1.8",
     "esbuild": "^0.24.0",
     "typescript": "^5.6.0"
