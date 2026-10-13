@@ -99,6 +99,15 @@ export const Channel = {
   DownloadCommand: 'dl:action',         // payload: { id, action: DownloadAction }
   ClearDownloads: 'dl:clear',           // remove finished/failed entries from the list
   ChooseDownloadDir: 'dl:choose-dir',   // invoke → string | null (picked folder)
+
+  // Save for offline (page snapshot + its videos) and the video tools behind it.
+  ShowOfflineMenu: 'off:menu',          // pop up the "Save for offline" menu for the active tab
+  SaveOffline: 'off:save',              // payload: OfflineWhat — save the active tab
+  GetOffline: 'off:list',               // invoke → OfflineItem[]
+  OfflineCommand: 'off:action',         // payload: { id, action: OfflineAction }
+  ClearOffline: 'off:clear',            // remove finished/failed entries from the list (files stay)
+  GetVideoTools: 'vt:get',              // invoke → VideoToolsState
+  InstallVideoTools: 'vt:install',      // download (or update) ffmpeg + yt-dlp
 } as const;
 
 /** Main → renderer. */
@@ -121,9 +130,11 @@ export const Event = {
   PrefsChanged: 'evt:prefs',             // payload: Prefs
   ProfilesChanged: 'evt:profiles',       // payload: ProfilesState
   DownloadsChanged: 'evt:downloads',     // payload: DownloadInfo[]
+  OfflineChanged: 'evt:offline',         // payload: OfflineItem[]
+  VideoToolsChanged: 'evt:video-tools',  // payload: VideoToolsState
 } as const;
 
-export type LibraryView = 'bookmarks' | 'history' | 'sessions' | 'downloads';
+export type LibraryView = 'bookmarks' | 'history' | 'sessions' | 'downloads' | 'offline';
 
 /** Colours a profile can take (its tabs get a stripe in it). */
 export const PROFILE_COLORS = ['#4f46e5', '#16a34a', '#ea580c', '#db2777', '#0891b2', '#ca8a04', '#7c3aed', '#64748b'];
@@ -162,6 +173,41 @@ export interface DownloadInfo {
   finished?: number;
   private: boolean;      // from a private tab: never written to disk-backed history
   profileId: string;
+}
+
+/** What "Save for offline" keeps: page + its videos, only the videos, only the page, or a whole playlist. */
+export type OfflineWhat = 'page+video' | 'video' | 'page' | 'playlist';
+export type OfflineStatus = 'queued' | 'working' | 'paused' | 'interrupted' | 'completed' | 'failed' | 'cancelled';
+export type OfflineAction = 'open' | 'show' | 'pause' | 'resume' | 'cancel' | 'retry' | 'remove' | 'delete';
+
+/** One "Save for offline": a folder with page.mhtml, the videos, subtitles and an index.html player. */
+export interface OfflineItem {
+  id: string;
+  title: string;
+  pageUrl: string;
+  what: OfflineWhat;
+  folder: string;
+  status: OfflineStatus;
+  stage: string;         // what it's doing now, in words ("Video 2 of 5: …")
+  received: number;      // bytes of the file being fetched now
+  total: number;         // -1 if unknown
+  speed: number;         // bytes/s
+  eta: number;           // seconds, -1 if unknown
+  videos: number;        // videos saved so far
+  error?: string;
+  started: number;
+  finished?: number;
+  private: boolean;
+  profileId: string;
+}
+
+/** ffmpeg (merge/convert any format) + yt-dlp (finds the video on 1000s of sites). Fetched once, on first use. */
+export interface VideoToolsState {
+  ready: boolean;
+  installing: boolean;
+  progress: number;      // 0–1 while installing
+  error?: string;
+  ytdlpVersion?: string;
 }
 
 /** Omnibox site search: typing "yt lofi" runs the "yt" engine. `url` holds a %s placeholder. */
@@ -206,6 +252,8 @@ export interface Prefs {
   downloadDir: string;           // '' = the system Downloads folder
   askWhereToSave: boolean;
   downloadConnections: number;   // max parallel connections per download (1–16)
+  videoQuality: number;          // offline videos: max height (360/480/720/1080), 0 = best, -1 = audio only
+  videoSubtitles: boolean;       // offline videos: also save English subtitles
 }
 
 export interface AdblockStats {
@@ -243,6 +291,7 @@ export interface TabState {
   private: boolean;   // in-memory private session: no history, no extensions
   profileId: string;  // profile the tab belongs to (ignored for private tabs)
   partition: string;  // Electron partition of its session ('' = default) — for the extension toolbar
+  hasVideo: boolean;  // a video or stream was seen on this page (lights up "Save for offline")
 }
 
 export interface NavigatePayload {
@@ -331,6 +380,14 @@ export interface BroApi {
   clearDownloads(): void;
   chooseDownloadDir(): Promise<string | null>;
 
+  showOfflineMenu(): void;
+  saveOffline(what: OfflineWhat): void;
+  getOffline(): Promise<OfflineItem[]>;
+  offlineAction(id: string, action: OfflineAction): void;
+  clearOffline(): void;
+  getVideoTools(): Promise<VideoToolsState>;
+  installVideoTools(): void;
+
   onOpacityChanged(cb: (value: number) => void): () => void;
   onCaptureHiddenChanged(cb: (hidden: boolean) => void): () => void;
   onOverlayModeChanged(cb: (on: boolean) => void): () => void;
@@ -349,6 +406,8 @@ export interface BroApi {
   onPrefsChanged(cb: (p: Prefs) => void): () => void;
   onProfilesChanged(cb: (s: ProfilesState) => void): () => void;
   onDownloadsChanged(cb: (list: DownloadInfo[]) => void): () => void;
+  onOfflineChanged(cb: (list: OfflineItem[]) => void): () => void;
+  onVideoToolsChanged(cb: (s: VideoToolsState) => void): () => void;
 
   readonly platform: NodeJS.Platform;
 }

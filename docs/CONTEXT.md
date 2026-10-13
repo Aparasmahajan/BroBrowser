@@ -34,6 +34,11 @@ is supported by the code but not built here.
 - Downloads (`downloads.ts`): segmented engine for range-capable http(s) files,
   Chromium's DownloadItem otherwise; state in `data/downloads.json` (private ones never).
 - Right-click: `context-menu.ts`, wired from `TabManager.onContextMenu`.
+- Save for offline (`offline.ts` + `video-tools.ts`): `session.webRequest.onResponseStarted`
+  sniffs videos/HLS/DASH per tab (`TabState.hasVideo` lights the toolbar button); a save is a
+  folder `<downloadDir>/Bro Offline/<title>/` with `page.mhtml` (`webContents.savePage`),
+  the videos (yt-dlp, run as a child process), subtitles and a generated `index.html` player.
+  State in `data/offline.json` (private-tab saves never). Tools live in `userData/tools`.
 
 ## Decisions worth knowing (and why)
 
@@ -46,6 +51,22 @@ is supported by the code but not built here.
 - A tab whose webContents dies on its own is dropped on `destroyed` (prevents a
   main-process crash in the tab list).
 - Private tabs: no history, never saved/exported, extensions off, wiped on last close.
+
+- Offline saves try **yt-dlp on the page URL first** (it knows 1000s of sites and every stream
+  format), then the streams Bro sniffed, with the tab's cookies (temp Netscape file, deleted
+  after) + UA + Referer. One save runs at a time (slow links do better that way).
+- yt-dlp needs a JS runtime for YouTube: Bro passes its **own Electron binary** with
+  `ELECTRON_RUN_AS_NODE=1` (`--js-runtimes node:<execPath>`). Don't disable Electron's
+  RunAsNode fuse, or YouTube saves lose formats.
+- `onResponseStarted` is used because Ghostery owns `onBeforeRequest`/`onHeadersReceived`
+  (Electron allows one listener per webRequest event per session).
+- Subtitles are inlined into `index.html` as blob: URLs — Chromium refuses `<track>` files
+  from file:// pages. MHTML pages run with scripts disabled (`executeJavaScript` never answers).
+- ffmpeg is ffmpeg-static b6.1.1 (one gz binary, ~30 MB; hashes pinned in `video-tools.ts`);
+  yt-dlp is always the latest release, checked against its SHA2-256SUMS. Asking yt-dlp for every
+  English subtitle variant (`en.*`) gets HTTP 429 from YouTube — keep the explicit list.
+- yt-dlp's catch-all extractors (`Generic`, `HTML5MediaEmbed`) title videos "<page> (1)", so
+  only known sites rename a save to the video's own title.
 
 ## Environment quirks (this dev machine)
 
@@ -83,7 +104,9 @@ pages on `--remote-debugging-port=9333`). Key tricks:
 - Downloads: `tests/e2e/fixtures/download-server.mjs` (ranges, throttle, flaky, bump).
   Point `downloadDir` at a temp folder during tests and reset `prefs.json` after.
 - `capturePage()` on the window is blank while screen-share hiding is on; capture
-  individual views instead (and it fails while the screen is locked).
+  individual views instead (and it fails while the screen is locked). An offscreen
+  `BrowserWindow` (`webPreferences.offscreen: true`) still renders while locked.
+- Offline: `tests/e2e/fixtures/offline-server.mjs` + `offline-suite.mjs` (see its README).
 
 ## Last verified state (2026-10-12)
 

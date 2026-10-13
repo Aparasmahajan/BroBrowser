@@ -13,8 +13,10 @@ import { ShortcutManager } from './shortcuts';
 import { commandHandlers } from './commands';
 import { Profiles, DEFAULT_PROFILE } from './profiles';
 import { DownloadManager } from './downloads';
+import { OfflineManager } from './offline';
+import { VideoTools } from './video-tools';
 import { showTabContextMenu, showUiContextMenu } from './context-menu';
-import { Event, type FindPayload, type LibraryView, type Prefs, type ProfilesState } from '../shared/ipc-contract';
+import { Event, type FindPayload, type LibraryView, type OfflineWhat, type Prefs, type ProfilesState } from '../shared/ipc-contract';
 import type { CustomShortcut } from '../shared/shortcuts';
 
 const BRIDGE_PRELOAD = join(__dirname, '../preload/bridge.js');
@@ -29,7 +31,23 @@ interface AppSettings {
   adblockEnabled: boolean;
 }
 
-const DEFAULT_PREFS: Prefs = { startup: 'restore', downloadDir: '', askWhereToSave: false, downloadConnections: 8 };
+const DEFAULT_PREFS: Prefs = {
+  startup: 'restore',
+  downloadDir: '',
+  askWhereToSave: false,
+  downloadConnections: 8,
+  videoQuality: 720,
+  videoSubtitles: true,
+};
+/** "Save for offline" quality choices: max height, 0 = best, -1 = audio only. */
+const VIDEO_QUALITIES: [number, string][] = [
+  [360, '360p — smallest, fine for slides and talks'],
+  [480, '480p'],
+  [720, '720p HD'],
+  [1080, '1080p Full HD'],
+  [0, 'Best available (biggest)'],
+  [-1, 'Audio only — least data'],
+];
 
 /**
  * Assembles the browser window: a top chrome bar (tabs + toolbar), the tab
@@ -57,6 +75,8 @@ export class Browser {
   readonly shortcuts: ShortcutManager;
   readonly profiles: Profiles;
   readonly downloads: DownloadManager;
+  readonly videoTools: VideoTools;
+  readonly offline: OfflineManager;
 
   private open: WebContentsView | null = null;
   private lastFind = '';
@@ -107,6 +127,17 @@ export class Browser {
       () => (win.isDestroyed() ? null : win),
       (partition) => (partition ? session.fromPartition(partition) : session.defaultSession),
     );
+    this.videoTools = new VideoTools(send);
+    this.offline = new OfflineManager(
+      send,
+      () => this.getPrefs(),
+      this.videoTools,
+      (partition) => (partition ? session.fromPartition(partition) : session.defaultSession),
+      (url) => {
+        this.closeOverlay();
+        this.tabs.newTab(url);
+      },
+    );
 
     // Private tabs: one shared in-memory session. Ads are blocked and downloads
     // tracked there too; extensions are never attached to it.
@@ -135,6 +166,9 @@ export class Browser {
       this.autosave();
       this.syncProfile();
     };
+    // Pages playing a video light up the "Save for offline" button.
+    this.tabs.hasVideo = (wc) => this.offline.hasVideo(wc);
+    this.offline.onMediaChanged = (wcId) => this.tabs.refresh(wcId);
 
     // Chrome-extension runtime, one per profile (also sets tabs.hooks).
     this.extensions = new Extensions(win, this.tabs, (id) => this.profileSession(id));
@@ -146,6 +180,7 @@ export class Browser {
         window: win,
         openTab: (url, o) => this.tabs.newTab(url, o),
         saveAs: (url, w) => this.downloads.saveAs(url, w),
+        saveOffline: (w, what, mediaUrl) => this.saveOffline(what, w, mediaUrl),
         resolve: (text) => this.tabs.resolve(text),
         searchEngineName: () => {
           const cfg = this.search.get();
@@ -161,7 +196,10 @@ export class Browser {
     // Keyboard shortcuts: in-app ones are matched on every view we own.
     this.shortcuts = new ShortcutManager(send, commandHandlers(mw, this), (s) => this.runCustom(s));
     for (const v of [this.chrome, ...this.overlays]) this.shortcuts.attach(v.webContents);
-    this.tabs.onWebContents = (wc) => this.shortcuts.attach(wc);
+    this.tabs.onWebContents = (wc) => {
+      this.shortcuts.attach(wc);
+      this.offline.track(wc);
+    };
 
     mw.emit = send;
     win.on('resize', () => this.layout());
@@ -183,6 +221,7 @@ export class Browser {
       void this.adblock.init();      // async: filter lists load in the background
       void this.extensions.init();   // async: Web Store + restore installed extensions
       this.downloads.init();         // continue downloads interrupted by the last exit
+      this.offline.init();           // …and offline saves
     });
   }
 
@@ -193,6 +232,7 @@ export class Browser {
     this.wired.add(s);
     this.adblock.addSession(s);
     this.downloads.attach(s, ctx);
+    this.offline.attach(s, ctx.partition);
   }
 
   /** A profile's session, wired on first use (extensions too). */
@@ -359,6 +399,50 @@ export class Browser {
     if (info) this.library.toggleBookmark(info.url, info.title);
   }
 
+  // --- Save for offline --------------------------------------------------------
+
+  /** Save a tab (default: the active one) for offline: page snapshot and/or its videos. */
+  saveOffline(what: OfflineWhat, wc = this.tabs.activeWebContents, mediaUrl?: string): void {
+    const ctx = wc && this.tabs.contextOf(wc);
+    if (!wc || !ctx || !/^https?:/i.test(wc.getURL())) return;
+    const partition = ctx.private ? PRIVATE_PARTITION : this.profiles.partition(ctx.profileId);
+    this.offline.save(wc, { private: ctx.private, profileId: ctx.profileId, partition }, what, mediaUrl);
+  }
+
+  /** Native menu under the toolbar's "Save for offline" button. */
+  showOfflineMenu(): void {
+    const wc = this.tabs.activeWebContents;
+    const url = wc?.getURL() ?? '';
+    const web = /^https?:/i.test(url);
+    const prefs = this.getPrefs();
+    const tools = this.videoTools.getState();
+    const playlist = web && /[?&]list=|\/playlist|\/course/i.test(url);
+    const quality = VIDEO_QUALITIES.find(([q]) => q === prefs.videoQuality)?.[1].split(' — ')[0] ?? '720p HD';
+    const menu = Menu.buildFromTemplate([
+      { label: `Save page + video (${quality})`, enabled: web, click: () => this.saveOffline('page+video') },
+      { label: 'Save video only', enabled: web, click: () => this.saveOffline('video') },
+      { label: 'Save page only', enabled: web, click: () => this.saveOffline('page') },
+      ...(playlist ? [{ label: 'Save the whole playlist / course', click: () => this.saveOffline('playlist') }] : []),
+      { type: 'separator' },
+      {
+        label: 'Video quality',
+        submenu: VIDEO_QUALITIES.map(([q, label]) => ({
+          label,
+          type: 'radio' as const,
+          checked: prefs.videoQuality === q,
+          click: () => this.setPrefs({ videoQuality: q }),
+        })),
+      },
+      { label: 'Save English subtitles', type: 'checkbox', checked: prefs.videoSubtitles, click: () => this.setPrefs({ videoSubtitles: !prefs.videoSubtitles }) },
+      { type: 'separator' },
+      { label: 'Offline library…', click: () => this.openLibrary('offline') },
+      ...(!tools.ready && !tools.installing
+        ? [{ label: 'The first video save fetches the video tools (~50 MB, once)', enabled: false }]
+        : []),
+    ]);
+    menu.popup({ window: this.mw.win });
+  }
+
   // --- Find in page ----------------------------------------------------------
 
   showFind(): void {
@@ -439,6 +523,8 @@ export class Browser {
     if (typeof p.downloadConnections === 'number' && Number.isFinite(p.downloadConnections)) {
       next.downloadConnections = Math.min(16, Math.max(1, Math.round(p.downloadConnections)));
     }
+    if (typeof p.videoQuality === 'number' && VIDEO_QUALITIES.some(([q]) => q === p.videoQuality)) next.videoQuality = p.videoQuality;
+    if (typeof p.videoSubtitles === 'boolean') next.videoSubtitles = p.videoSubtitles;
     this.prefs.set(next);
     this.send(Event.PrefsChanged, next);
   }
@@ -472,6 +558,7 @@ export class Browser {
     this.search.flush();
     this.profiles.flush();
     this.downloads.flush();
+    this.offline.flush();
     this.shortcuts.dispose();
   }
 }

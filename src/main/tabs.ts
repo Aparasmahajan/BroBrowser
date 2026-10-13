@@ -112,6 +112,8 @@ export class TabManager {
   onWebContents: (wc: WebContents) => void = () => {};
   /** After any tab-list change (session autosave). Set by Browser. */
   onChanged: () => void = () => {};
+  /** Has a video been seen on this tab's page? Set by Browser. */
+  hasVideo: (wc: WebContents) => boolean = () => false;
 
   constructor(
     private win: BrowserWindow,
@@ -514,6 +516,7 @@ export class TabManager {
         private: tab.private,
         profileId: tab.profileId,
         partition: this.partitionOf(tab),
+        hasVideo: false,
       };
     }
     const url = wc.getURL();
@@ -533,7 +536,19 @@ export class TabManager {
       private: tab.private,
       profileId: tab.profileId,
       partition: this.partitionOf(tab),
+      hasVideo: !isStart && this.hasVideo(wc),
     };
+  }
+
+  /** Something outside the tab changed what it shows (e.g. a video was found): re-send the list. */
+  refresh(wcId: number): void {
+    if (this.tabs.some((t) => !t.sleeping && !t.view.webContents.isDestroyed() && t.view.webContents.id === wcId)) this.emitChanged();
+  }
+
+  /** The tab a webContents belongs to: private or not, and its profile. */
+  contextOf(wc: WebContents): TabContext | undefined {
+    const t = this.tabs.find((x) => x.view.webContents === wc);
+    return t && { tabId: t.id, private: t.private, profileId: t.profileId };
   }
 
   private partitionOf(tab: Tab): string {

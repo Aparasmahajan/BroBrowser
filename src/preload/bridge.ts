@@ -15,6 +15,8 @@ import {
   type Prefs,
   type ProfilesState,
   type DownloadInfo,
+  type OfflineItem,
+  type VideoToolsState,
 } from '../shared/ipc-contract';
 import type { ShortcutsState } from '../shared/shortcuts';
 
@@ -104,6 +106,14 @@ const api: BroApi = {
   clearDownloads: () => ipcRenderer.send(Channel.ClearDownloads),
   chooseDownloadDir: () => ipcRenderer.invoke(Channel.ChooseDownloadDir) as Promise<string | null>,
 
+  showOfflineMenu: () => ipcRenderer.send(Channel.ShowOfflineMenu),
+  saveOffline: (what) => ipcRenderer.send(Channel.SaveOffline, what),
+  getOffline: () => ipcRenderer.invoke(Channel.GetOffline) as Promise<OfflineItem[]>,
+  offlineAction: (id, action) => ipcRenderer.send(Channel.OfflineCommand, { id, action }),
+  clearOffline: () => ipcRenderer.send(Channel.ClearOffline),
+  getVideoTools: () => ipcRenderer.invoke(Channel.GetVideoTools) as Promise<VideoToolsState>,
+  installVideoTools: () => ipcRenderer.send(Channel.InstallVideoTools),
+
   onOpacityChanged: (cb) => on<number>(Event.OpacityChanged, cb),
   onCaptureHiddenChanged: (cb) => on<boolean>(Event.CaptureHiddenChanged, cb),
   onOverlayModeChanged: (cb) => on<boolean>(Event.OverlayModeChanged, cb),
@@ -122,6 +132,8 @@ const api: BroApi = {
   onPrefsChanged: (cb) => on<Prefs>(Event.PrefsChanged, cb),
   onProfilesChanged: (cb) => on<ProfilesState>(Event.ProfilesChanged, cb),
   onDownloadsChanged: (cb) => on<DownloadInfo[]>(Event.DownloadsChanged, cb),
+  onOfflineChanged: (cb) => on<OfflineItem[]>(Event.OfflineChanged, cb),
+  onVideoToolsChanged: (cb) => on<VideoToolsState>(Event.VideoToolsChanged, cb),
 
   platform: process.platform,
 };

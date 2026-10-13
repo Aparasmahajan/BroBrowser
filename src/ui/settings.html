@@ -142,6 +142,37 @@
             <span id="dl-conn-val" class="mono">8</span>
           </div>
         </div>
+
+        <h3 class="subhead">Save for offline (pages + videos)</h3>
+        <div class="row">
+          <div class="row-label">
+            <strong>Video quality</strong>
+            <small>Ctrl/Cmd+S (or the button next to Downloads) saves the page and its video into “Bro Offline” in the folder above.
+              Lower quality saves data: a 1-hour lecture is roughly 200 MB at 360p, 500 MB at 720p, 40 MB as audio only.</small>
+          </div>
+          <select id="vid-quality" class="select">
+            <option value="360">360p — smallest</option>
+            <option value="480">480p</option>
+            <option value="720">720p HD</option>
+            <option value="1080">1080p Full HD</option>
+            <option value="0">Best available</option>
+            <option value="-1">Audio only — least data</option>
+          </select>
+        </div>
+        <div class="row">
+          <div class="row-label">
+            <strong>Save English subtitles</strong>
+            <small>When the video has them. They show in the offline player.</small>
+          </div>
+          <button id="vid-subs" class="pill" role="switch" aria-checked="true"><span class="dot"></span><span id="vid-subs-text">ON</span></button>
+        </div>
+        <div class="row">
+          <div class="row-label">
+            <strong>Video tools</strong>
+            <small id="vt-detail">yt-dlp finds the video on thousands of sites; ffmpeg turns any format into one that plays. About 50 MB, fetched once.</small>
+          </div>
+          <button id="vt-install" class="text-btn accent">Download now</button>
+        </div>
       </section>
 
       <section class="group" id="search">
