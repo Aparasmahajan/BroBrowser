@@ -52,9 +52,19 @@ is supported by the code but not built here.
   main-process crash in the tab list).
 - Private tabs: no history, never saved/exported, extensions off, wiped on last close.
 
-- Offline saves try **yt-dlp on the page URL first** (it knows 1000s of sites and every stream
-  format), then the streams Bro sniffed, with the tab's cookies (temp Netscape file, deleted
-  after) + UA + Referer. One save runs at a time (slow links do better that way).
+- Offline saves try: the right-clicked video, **yt-dlp on the page URL** (it knows 1000s of
+  sites), then the streams Bro sniffed — HLS and plain files through **the tab's own session**
+  (`stream-grabber.ts`, Chromium's network stack: same cookies/UA/TLS, so bot walls and signed
+  CDN links let it through), DASH through yt-dlp. yt-dlp gets the tab's cookies (temp Netscape
+  file, deleted after) + UA + Referer, and is retried with `--impersonate chrome` when refused.
+  One save runs at a time (slow links do better that way).
+- Never hand yt-dlp a stream URL without `--use-extractors generic`: site extractors match by
+  host, e.g. `udemy.com/assets/….m3u8` was treated as a Udemy course → 403.
+- Browser-path HLS: picks the variant for the quality setting (+ its EXT-X-MEDIA audio), mirrors
+  segments/keys/init into `.bro-stream-<hash>/` (kept between retries, so it resumes), then
+  `ffmpeg -allowed_extensions ALL -protocol_whitelist file,crypto,data` joins them. AES-128 with
+  KEYFORMAT identity is plain HLS; any other key method/format is DRM and refused. Live streams
+  (no ENDLIST) are refused.
 - yt-dlp needs a JS runtime for YouTube: Bro passes its **own Electron binary** with
   `ELECTRON_RUN_AS_NODE=1` (`--js-runtimes node:<execPath>`). Don't disable Electron's
   RunAsNode fuse, or YouTube saves lose formats.

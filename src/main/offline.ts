@@ -7,6 +7,7 @@ import { extname, join, parse } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { JsonStore } from './store';
 import { killTree, type VideoTools } from './video-tools';
+import { grabFile, grabHls, removeStreamDirs, type GrabContext } from './stream-grabber';
 import { Event, type OfflineAction, type OfflineItem, type OfflineWhat, type Prefs } from '../shared/ipc-contract';
 
 const EMIT_MS = 400;
@@ -64,7 +65,19 @@ const PUBLIC_KEYS: (keyof OfflineItem)[] = [
   'videos', 'error', 'started', 'finished', 'private', 'profileId',
 ];
 
-type Outcome = 'ok' | 'none' | 'drm' | 'network' | 'stopped' | 'error';
+type Outcome = 'ok' | 'none' | 'drm' | 'network' | 'live' | 'stopped' | 'error';
+
+/** The save running now: its process (yt-dlp/ffmpeg) and in-flight browser requests, for Pause/Cancel. */
+interface Job {
+  id: string;
+  proc: ChildProcess | null;
+  stopped: boolean;
+  aborts: (() => void)[];
+}
+
+const NO_VIDEO = 'No video Bro can save was found here. Press play on the video, wait a few seconds, then save again.';
+/** What download tools hear from bot walls and expired links. */
+const BLOCKED = /HTTP Error 40[13]|\b40[13]\b|Forbidden|Unauthorized|cloudflare|captcha|confirm you.re not a bot|Sign in to confirm/i;
 
 /**
  * "Save for offline": a page snapshot (MHTML, opens without internet) plus
@@ -85,7 +98,7 @@ export class OfflineManager {
   private readonly found = new Map<number, Media[]>();
   private readonly sessions = new Map<string, Session>();
   private readonly timers = new Map<string, NodeJS.Timeout>();
-  private running: { id: string; proc: ChildProcess | null; stopped: boolean } | null = null;
+  private running: Job | null = null;
   private emitTimer: NodeJS.Timeout | null = null;
 
   /** A page started/stopped having video: the toolbar button follows. */
@@ -261,6 +274,7 @@ export class OfflineManager {
           r.status = 'cancelled';
           r.stage = 'Cancelled';
           void removePartials(r.folder);
+          void removeStreamDirs(r.folder);
         }
         break;
       case 'remove':
@@ -314,7 +328,7 @@ export class OfflineManager {
     if (this.running) return;
     const next = [...this.recs.values()].filter((r) => r.status === 'queued').sort((a, b) => a.started - b.started)[0];
     if (!next) return;
-    this.running = { id: next.id, proc: null, stopped: false };
+    this.running = { id: next.id, proc: null, stopped: false, aborts: [] };
     void this.run(next).finally(() => {
       this.running = null;
       this.changed(true);
@@ -360,11 +374,9 @@ export class OfflineManager {
       }
       if (outcome === 'network') return this.interrupted(r);
       if (outcome !== 'ok') {
-        if (r.what === 'page+video' && existsSync(join(r.folder, PAGE_FILE))) {
-          r.note = 'No video Bro could save was found on this page, so only the page was saved. Press play on the video, then save again.';
-        } else {
-          return this.fail(r, r.error ?? 'No video Bro can save was found here. Press play on the video first, then try again.');
-        }
+        const why = r.error ?? NO_VIDEO;
+        if (r.what === 'page+video' && existsSync(join(r.folder, PAGE_FILE))) r.note = `Only the page was saved. ${why}`;
+        else return this.fail(r, why);
       }
       await this.convertAll(r, job);
       if (job.stopped) return;
@@ -376,34 +388,100 @@ export class OfflineManager {
     }
   }
 
-  /** Try yt-dlp on: the right-clicked video, the page itself, then the streams seen on the page. */
-  private async fetchVideos(r: Rec, job: { stopped: boolean }): Promise<Outcome> {
+  /**
+   * Try, in order: the right-clicked video (through the browser), yt-dlp on the page
+   * (it knows 1000s of sites), then the streams the page played — fetched through the
+   * tab's own browser session, which works where sites block download tools.
+   */
+  private async fetchVideos(r: Rec, job: Job): Promise<Outcome> {
     const cookies = await this.cookieFile(r);
     try {
-      const targets: { url: string; page: boolean }[] = [];
-      if (r.mediaUrl) targets.push({ url: r.mediaUrl, page: false });
-      targets.push({ url: r.pageUrl, page: true });
-      for (const m of r.media.slice(0, 4)) if (m.url !== r.mediaUrl) targets.push({ url: m.url, page: false });
+      type Target = { url: string; how: 'browser'; kind: 'hls' | 'file' } | { url: string; how: 'ytdlp'; page: boolean };
+      const targets: Target[] = [];
+      if (r.mediaUrl) targets.push({ url: r.mediaUrl, how: 'browser', kind: /\.m3u8(\?|$)/i.test(r.mediaUrl) ? 'hls' : 'file' });
+      if (r.what !== 'video' || !r.mediaUrl) targets.push({ url: r.pageUrl, how: 'ytdlp', page: true });
+      // A playlist/course only makes sense from the page itself.
+      if (r.what !== 'playlist') {
+        for (const m of r.media.slice(0, 4)) {
+          if (m.url === r.mediaUrl) continue;
+          targets.push(m.kind === 'dash' ? { url: m.url, how: 'ytdlp', page: false } : { url: m.url, how: 'browser', kind: m.kind });
+        }
+      }
 
-      let last: Outcome = 'none';
+      const seen: Outcome[] = [];
+      const errors: string[] = [];
       for (const t of targets) {
         if (job.stopped) return 'stopped';
-        last = await this.ytdlp(r, t.url, t.page, cookies);
-        if (last === 'error' && !r.systemCerts && /CERTIFICATE_VERIFY_FAILED/i.test(r.error ?? '')) {
-          r.systemCerts = true; // TLS-inspecting network: trust what Windows/macOS trusts
-          last = await this.ytdlp(r, t.url, t.page, cookies);
-        }
-        if (last === 'ok' || last === 'drm' || last === 'network' || last === 'stopped') return last;
-        // A playlist only makes sense from the page itself.
-        if (r.what === 'playlist') return last;
+        r.error = undefined;
+        const out = t.how === 'browser' ? await this.browserGrab(r, t.url, t.kind, job) : await this.ytdlpTries(r, t.url, t.page, cookies);
+        if (out === 'ok' || out === 'stopped' || out === 'drm') return out;
+        seen.push(out);
+        if (r.error) errors.push(r.error);
       }
-      return last;
+      if (seen.includes('network')) return 'network';
+      r.error = explain(r, seen, errors);
+      return seen.every((s) => s === 'none') ? 'none' : 'error';
     } finally {
       if (cookies) await rm(cookies, { force: true }).catch(() => {});
     }
   }
 
-  private ytdlp(r: Rec, url: string, isPage: boolean, cookies: string | null): Promise<Outcome> {
+  /** yt-dlp, again with the OS certificate store or posing as Chrome if the first try is refused. */
+  private async ytdlpTries(r: Rec, url: string, isPage: boolean, cookies: string | null): Promise<Outcome> {
+    let out = await this.ytdlp(r, url, isPage, cookies);
+    if (out === 'error' && !r.systemCerts && /CERTIFICATE_VERIFY_FAILED/i.test(r.error ?? '')) {
+      r.systemCerts = true; // TLS-inspecting network: trust what Windows/macOS trusts
+      out = await this.ytdlp(r, url, isPage, cookies);
+    }
+    // Bot walls (Cloudflare & co.) often let a request through that looks like Chrome down to its TLS handshake.
+    if (out === 'error' && BLOCKED.test(r.error ?? '')) out = await this.ytdlp(r, url, isPage, cookies, true);
+    return out;
+  }
+
+  /** Fetch a stream the page played through the tab's own session (cookies, user agent). */
+  private async browserGrab(r: Rec, url: string, kind: 'hls' | 'file', job: Job): Promise<Outcome> {
+    let lastBytes = 0;
+    let lastAt = Date.now();
+    const ctx: GrabContext = {
+      sess: this.sessionFor(r),
+      referer: r.pageUrl,
+      folder: r.folder,
+      name: safeName(r.title),
+      quality: r.quality,
+      connections: this.prefs().downloadConnections || 4,
+      stopped: () => job.stopped,
+      onAbort: (fn) => job.aborts.push(fn),
+      progress: (received, total) => {
+        const now = Date.now();
+        if (now - lastAt >= 1000) {
+          const inst = Math.max(0, ((received - lastBytes) * 1000) / (now - lastAt));
+          r.speed = r.speed ? r.speed * 0.6 + inst * 0.4 : inst;
+          lastBytes = received;
+          lastAt = now;
+        }
+        r.received = received;
+        r.total = total;
+        r.eta = total > 0 && r.speed > 0 ? (total - received) / r.speed : -1;
+        this.changed();
+      },
+      stage: (text) => {
+        r.stage = text;
+        this.changed(true);
+      },
+      ffmpeg: (args) => this.runFfmpeg(args),
+    };
+    const res = kind === 'hls' ? await grabHls(ctx, url) : await grabFile(ctx, url);
+    r.speed = 0;
+    if (res.outcome === 'ok') {
+      r.videos = Math.max(r.videos, 1);
+      return 'ok';
+    }
+    r.error = res.error;
+    if (res.outcome === 'drm' || res.outcome === 'network' || res.outcome === 'stopped' || res.outcome === 'live') return res.outcome;
+    return 'error';
+  }
+
+  private ytdlp(r: Rec, url: string, isPage: boolean, cookies: string | null, impersonate = false): Promise<Outcome> {
     const audioOnly = r.quality === -1;
     const name = r.what === 'playlist'
       ? '%(playlist_index|0)03d - %(title).120B [%(id)s].%(ext)s'
@@ -427,6 +505,10 @@ export class OfflineManager {
     if (r.userAgent) args.push('--user-agent', r.userAgent);
     if (!isPage) args.push('--add-header', `Referer:${r.pageUrl}`);
     if (r.systemCerts) args.push('--compat-options', 'no-certifi');
+    if (impersonate) args.push('--impersonate', 'chrome');
+    // A stream address is just a stream: don't let a site extractor mistake it for a page
+    // (udemy.com/assets/… would otherwise be fetched as a Udemy course).
+    if (!isPage) args.push('--use-extractors', 'generic');
     args.push('--', url);
 
     r.stage = isPage ? 'Looking for the video…' : 'Downloading the stream the page played…';
@@ -506,7 +588,7 @@ export class OfflineManager {
   /** The tab's cookies for the page and stream hosts (so signed-in course videos work). */
   private async cookieFile(r: Rec): Promise<string | null> {
     try {
-      const sess = this.sessions.get(r.partition) ?? this.resolveSession(r.partition);
+      const sess = this.sessionFor(r);
       const domains = new Set([r.pageUrl, r.mediaUrl, ...r.media.map((m) => m.url)].filter(Boolean).map((u) => baseDomain(hostOf(u!))));
       const all = await sess.cookies.get({});
       const lines = ['# Netscape HTTP Cookie File'];
@@ -540,7 +622,7 @@ export class OfflineManager {
 
       const copy = (!info.video || MP4_VIDEO.includes(info.video)) && (!info.audio || MP4_AUDIO.includes(info.audio));
       const out = uniqueFile(join(r.folder, `${parse(file).name}${info.video ? '.mp4' : '.m4a'}`));
-      const args = ['-y', '-i', path, '-map', '0:v:0?', '-map', '0:a:0?', '-movflags', '+faststart', '-progress', 'pipe:1', '-nostats'];
+      const args = ['-y', '-i', path, '-map', '0:v:0?', '-map', '0:a:0?', '-movflags', '+faststart'];
       if (copy) args.push('-c', 'copy');
       else args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k');
       args.push(out);
@@ -549,24 +631,35 @@ export class OfflineManager {
       r.received = 0;
       r.total = -1;
       this.changed(true);
-      const ok = await new Promise<boolean>((resolve) => {
-        const p = this.tools.ffmpegProcess(args);
-        if (this.running) this.running.proc = p;
-        p.stdout?.on('data', (d: Buffer) => {
-          const m = /out_time_us=(\d+)/.exec(d.toString());
-          if (m && info.duration > 0) {
-            r.received = Math.min(1000, Math.round((Number(m[1]) / 1e6 / info.duration) * 1000));
-            r.total = 1000;
-            this.changed();
-          }
-        });
-        p.on('error', () => resolve(false));
-        p.on('close', (code) => resolve(code === 0));
+      const ok = await this.runFfmpeg(args, (seconds) => {
+        if (info.duration <= 0) return;
+        r.received = Math.min(1000, Math.round((seconds / info.duration) * 1000));
+        r.total = 1000;
+        this.changed();
       });
       if (job.stopped) return void rm(out, { force: true }).catch(() => {});
       if (ok) await rm(path, { force: true });
       else await rm(out, { force: true });
     }
+  }
+
+  /** Run ffmpeg as the current job's process (so Pause/Cancel stop it); true on success. */
+  private runFfmpeg(args: string[], onTime?: (seconds: number) => void): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      const withProgress = onTime ? ['-progress', 'pipe:1', '-nostats', ...args] : args;
+      const p = this.tools.ffmpegProcess(withProgress);
+      if (this.running) this.running.proc = p;
+      p.stdout?.on('data', (d: Buffer) => {
+        const m = /out_time_us=(\d+)/.exec(d.toString());
+        if (m && onTime) onTime(Number(m[1]) / 1e6);
+      });
+      p.on('error', () => resolve(false));
+      p.on('close', (code) => resolve(code === 0));
+    });
+  }
+
+  private sessionFor(r: Rec): Session {
+    return this.sessions.get(r.partition) ?? this.resolveSession(r.partition);
   }
 
   private async probe(file: string): Promise<{ video?: string; audio?: string; duration: number }> {
@@ -645,6 +738,7 @@ export class OfflineManager {
     if (!this.running) return;
     this.running.stopped = true;
     if (this.running.proc) killTree(this.running.proc);
+    for (const abort of this.running.aborts) abort();
   }
 
   private cancelTimer(id: string): void {
@@ -859,10 +953,14 @@ function mediaKind(url: string, type: string | undefined): Media['kind'] | null 
   return null;
 }
 
-/** Manifests first (they carry every quality), then the biggest files. */
+/**
+ * Manifests first (they carry every quality), in the order the player loaded them —
+ * players load the master list before the one quality they play, and only the master
+ * lets Bro pick the quality you chose. Then plain files, biggest first.
+ */
 function byUsefulness(a: Media, b: Media): number {
   const rank = (m: Media) => (m.kind === 'file' ? 1 : 0);
-  return rank(a) - rank(b) || b.size - a.size;
+  return rank(a) - rank(b) || (a.kind === 'file' ? b.size - a.size : 0);
 }
 
 function header(h: Record<string, string[]> | undefined, name: string): string | undefined {
@@ -894,6 +992,29 @@ function baseDomain(host: string): string {
   if (parts.length <= 2) return host;
   const n = parts.at(-1)!.length === 2 && parts.at(-2)!.length <= 3 ? 3 : 2;
   return parts.slice(-n).join('.');
+}
+
+/** The most useful thing to tell the user when nothing could be saved. */
+function explain(r: Rec, seen: Outcome[], errors: string[]): string {
+  const all = errors.join('\n');
+  const played = r.media.length > 0 || !!r.mediaUrl;
+  if (seen.includes('live')) return 'This is a live stream — it can be saved once it has ended.';
+  if (r.what === 'playlist') {
+    return `This site doesn’t let Bro save the whole course at once${all ? ` (${shortError(errors.at(-1) ?? '')})` : ''}. Open each lesson, press play, then press Ctrl+S — every lesson is saved on its own.`;
+  }
+  if (BLOCKED.test(all)) {
+    return played
+      ? 'The site refused the download, even through the browser. Reload the page, press play, wait a few seconds, then save again (links to videos expire). If you need to sign in to watch, sign in first.'
+      : 'The site blocks download tools. Press play on the video, wait a few seconds, then save again — Bro will fetch the video the same way your browser plays it.';
+  }
+  if (/\b(404|410)\b/.test(all)) return 'The link to the video has expired. Reload the page, press play, then save again.';
+  if (!played) return NO_VIDEO;
+  return errors.length ? `The video couldn’t be saved: ${shortError(errors.at(-1)!)}` : NO_VIDEO;
+}
+
+/** yt-dlp's errors carry a "[site] id:" prefix and a "(caused by …)" tail — keep the readable part. */
+function shortError(e: string): string {
+  return e.replace(/^\[[^\]]+\]\s*[^:]*:\s*/, '').replace(/\s*\(caused by .*$/i, '').slice(0, 160);
 }
 
 function looksOffline(text: string): boolean {

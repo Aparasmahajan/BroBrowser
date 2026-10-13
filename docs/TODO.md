@@ -35,7 +35,10 @@ _Nothing right now._
 
 - [ ] **Save for offline — follow-ups** (feature done 2026-10-13, see Done):
   - [ ] Pick which video when a page has several streams (today: yt-dlp's choice, else manifests
-        first, then the biggest file).
+        in the order the player loaded them, then the biggest file).
+  - [ ] Course lessons all get the course's tab title (Udemy: "Course: … | Udemy"), so folders
+        are "(2)", "(3)"… — read the lesson title from the page instead.
+  - [ ] Browser-path DASH (separate .mpd video/audio) — today only yt-dlp handles DASH.
   - [ ] Show "Save for offline" progress in the Downloads view too (today: Library → Offline).
   - [ ] Optional: bundle yt-dlp + ffmpeg into the installer (`extraResources`) for installs with
         no internet at all; `video-tools.ts` would look there first.
@@ -48,6 +51,8 @@ _Nothing right now._
 - [ ] Export / Import (native file dialogs) and Clear cookies / Clear cache buttons.
 - [ ] Fullscreen requested by a page (video ⛶ button) — tab view may need re-layout.
 - [ ] YouTube shield on music.youtube.com and m.youtube.com (covered by the hostname match).
+- [ ] Save for offline on a real Udemy lecture after the fix (needs the owner's sign-in; the
+  failure was reproduced with a local "bot wall" fixture instead).
 - [ ] Save for offline: a real playlist download end to end (only the file naming was checked with
   a dry run), private-tab saves, the macOS builds of yt-dlp/ffmpeg, and losing the network
   mid-save (the retry path is coded; pause/resume and restart-resume were exercised).
@@ -64,6 +69,14 @@ _Nothing right now._
   only `winCodeSign-2.6.0` is needed.
 
 ## Done
+
+- [x] 2026-10-13 Fixed: Udemy save failed with "[udemy:course] assets … HTTP 403". The stream the page
+  played was handed to yt-dlp, which mistook `udemy.com/assets/…m3u8` for a course page. Now:
+  streams the page played are fetched **through the tab's own browser session** (`stream-grabber.ts`:
+  HLS incl. AES-128, separate audio, byte ranges; plain files), yt-dlp only gets stream URLs with
+  `--use-extractors generic`, retries as Chrome (`--impersonate chrome`) when refused, and failures
+  are explained in plain words. Also: the master playlist is used (quality choice was ignored).
+  E2E 29/29.
 
 - [x] 2026-10-13 **Save for offline** (Ctrl+S / toolbar button / right-click): page snapshot (MHTML) +
   video(s) as MP4 + English subtitles + `index.html` offline player (speed, resume, lesson list);
