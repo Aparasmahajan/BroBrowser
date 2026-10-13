@@ -1,15 +1,18 @@
-// Library overlay: Bookmarks, History and saved Sessions. Clicking a bookmark
-// or history item navigates the active tab and closes the overlay; clicking a
-// session reopens its tabs. Uses the privileged `window.bro` bridge.
+// Library page: Bookmarks, History, saved Sessions, Downloads and Offline videos —
+// Chrome-style (header with search, side nav, cards). Shown over the page (Ctrl/Cmd+Y)
+// or as a tab (bro://downloads …). Uses the privileged `window.bro` bridge.
 import {
+  DOWNLOAD_PRIORITIES,
   type Bookmark,
   type DownloadAction,
   type DownloadInfo,
+  type DownloadPriority,
   type HistoryEntry,
   type ProfilesState,
   type LibraryView,
   type OfflineAction,
   type OfflineItem,
+  type Prefs,
   type SavedSession,
 } from '../shared/ipc-contract';
 
@@ -20,6 +23,28 @@ const $ = <T extends HTMLElement>(id: string): T => {
   return el as T;
 };
 
+/** Tiny DOM builder: h('div', { className: 'x' }, child, 'text'). */
+function h<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  props: Partial<HTMLElementTagNameMap[K]> & Record<string, unknown> = {},
+  ...children: (Node | string | null | false | undefined)[]
+): HTMLElementTagNameMap[K] {
+  const el = document.createElement(tag);
+  Object.assign(el, props);
+  for (const c of children) if (c) el.append(c);
+  return el;
+}
+
+/** An icon from the page's sprite. */
+function icon(id: string, cls = 'ico'): SVGSVGElement {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('class', cls);
+  const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+  use.setAttribute('href', `#${id}`);
+  svg.appendChild(use);
+  return svg;
+}
+
 let view: LibraryView = 'bookmarks';
 let bookmarks: Bookmark[] = [];
 let history: HistoryEntry[] = [];
@@ -27,6 +52,7 @@ let sessions: SavedSession[] = [];
 let downloads: DownloadInfo[] = [];
 let offline: OfflineItem[] = [];
 let profiles: ProfilesState | null = null;
+let prefs: Prefs | null = null;
 let filter = '';
 
 const listEl = $('list');
@@ -35,6 +61,7 @@ const clearBtn = $<HTMLButtonElement>('clear-history');
 const filterEl = $<HTMLInputElement>('filter');
 const saveForm = $<HTMLFormElement>('save-session');
 const sessionName = $<HTMLInputElement>('session-name');
+const dlPanel = $('dl-panel');
 const viewTabs: Record<LibraryView, HTMLElement> = {
   bookmarks: $('tab-bookmarks'),
   history: $('tab-history'),
@@ -42,34 +69,38 @@ const viewTabs: Record<LibraryView, HTMLElement> = {
   downloads: $('tab-downloads'),
   offline: $('tab-offline'),
 };
-const clearDownloadsBtn = $<HTMLButtonElement>('clear-downloads');
 const profileNote = $('profile-note');
-clearDownloadsBtn.addEventListener('click', () => bro.clearDownloads());
+$('clear-downloads').addEventListener('click', () => bro.clearDownloads());
 const clearOfflineBtn = $<HTMLButtonElement>('clear-offline');
 clearOfflineBtn.addEventListener('click', () => bro.clearOffline());
 
 /** Opened as a page in a tab (bro://downloads, bro://offline) rather than over the page. */
 const inTab = new URLSearchParams(location.search).has('tab');
-const VIEW_TITLES: Record<LibraryView, string> = {
-  bookmarks: 'Bookmarks',
-  history: 'History',
-  sessions: 'Sessions',
-  downloads: 'Downloads',
-  offline: 'Offline videos',
+const VIEWS: Record<LibraryView, { title: string; icon: string; search: string }> = {
+  bookmarks: { title: 'Bookmarks', icon: 'i-star', search: 'Search bookmarks' },
+  history: { title: 'History', icon: 'i-clock', search: 'Search history' },
+  sessions: { title: 'Sessions', icon: 'i-tabs', search: 'Search sessions' },
+  downloads: { title: 'Downloads', icon: 'i-download', search: 'Search downloads' },
+  offline: { title: 'Offline videos', icon: 'i-offline', search: 'Search offline videos' },
 };
 
 // --- Header controls -------------------------------------------------------
 $('close').hidden = inTab; // a tab is closed like any tab
 $('close').addEventListener('click', () => bro.closeLibrary());
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !inTab) bro.closeLibrary();
+  if (e.key !== 'Escape') return;
+  if (filterEl.value) {
+    filterEl.value = '';
+    filter = '';
+    render();
+  } else if (!inTab) bro.closeLibrary();
 });
 
 for (const [v, el] of Object.entries(viewTabs) as [LibraryView, HTMLElement][]) {
   el.addEventListener('click', () => setView(v));
 }
 clearBtn.addEventListener('click', () => {
-  bro.clearHistory();
+  if (confirm('Delete all browsing history?')) bro.clearHistory();
 });
 filterEl.addEventListener('input', () => {
   filter = filterEl.value.trim().toLowerCase();
@@ -85,136 +116,51 @@ function setView(v: LibraryView): void {
   view = v;
   for (const [k, el] of Object.entries(viewTabs)) el.classList.toggle('active', k === v);
   clearBtn.hidden = v !== 'history';
-  clearDownloadsBtn.hidden = v !== 'downloads';
   clearOfflineBtn.hidden = v !== 'offline';
+  dlPanel.hidden = v !== 'downloads';
   saveForm.hidden = v !== 'sessions';
-  if (inTab) {
-    // The address bar shows bro://<view>, and the tab is named after it.
-    window.history.replaceState(null, '', `#${v}`);
-    document.title = VIEW_TITLES[v];
-  }
+  $('page-title').textContent = VIEWS[v].title;
+  $('title-icon').setAttribute('href', `#${VIEWS[v].icon}`);
+  $('empty-icon').setAttribute('href', `#${VIEWS[v].icon}`);
+  filterEl.placeholder = VIEWS[v].search;
+  document.title = VIEWS[v].title;
+  // The address bar shows bro://<view>.
+  if (inTab) window.history.replaceState(null, '', `#${v}`);
+  dlLayout = ''; // the list is rebuilt for another view
   render();
 }
 
-// Opened on a specific view (Ctrl/Cmd+H → History, Ctrl/Cmd+Shift+D → Sessions).
-bro.onLibraryView(setView);
-if (inTab) {
-  const start = location.hash.slice(1) as LibraryView;
-  setView(start in VIEW_TITLES ? start : 'downloads');
-}
 
-// --- Rendering -------------------------------------------------------------
+// --- Formatting ---------------------------------------------------------------
 function timeAgo(ts: number): string {
   const s = Math.floor((Date.now() - ts) / 1000);
   if (s < 60) return 'just now';
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
   return new Date(ts).toLocaleDateString();
 }
 
-interface Row {
-  title: string;
-  sub: string;
-  meta: string;
-  tooltip?: string;
-  open: () => void;
-  remove?: { label: string; run: () => void };
+const clock = (ts: number) => new Date(ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+
+/** "Today", "Yesterday", or "Monday, October 6, 2026" — Chrome's day headings. */
+function dayLabel(ts: number): string {
+  const d = new Date(ts);
+  const today = new Date();
+  const start = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((start(today) - start(d)) / 86_400_000);
+  const full = d.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+  return days === 0 ? `Today – ${full}` : days === 1 ? `Yesterday – ${full}` : full;
 }
 
-function rows(): Row[] {
-  const match = (...texts: string[]) => !filter || texts.some((t) => t.toLowerCase().includes(filter));
-  if (view === 'sessions') {
-    return sessions
-      .filter((s) => match(s.name, ...s.tabs.flatMap((t) => [t.title, t.url])))
-      .map((s) => ({
-        title: s.name,
-        sub: `${s.tabs.length} tab${s.tabs.length === 1 ? '' : 's'} · ${s.tabs
-          .slice(0, 3)
-          .map((t) => t.title || prettyUrl(t.url))
-          .join(', ')}${s.tabs.length > 3 ? ', …' : ''}`,
-        meta: timeAgo(s.ts),
-        tooltip: s.tabs.map((t) => t.title || t.url).join('\n'),
-        open: () => bro.openSession(s.id),
-        remove: { label: 'Delete session', run: () => bro.removeSession(s.id) },
-      }));
+function byDay<T>(items: T[], ts: (x: T) => number): { label: string; items: T[] }[] {
+  const out: { label: string; items: T[] }[] = [];
+  for (const x of items) {
+    const label = dayLabel(ts(x));
+    if (out.at(-1)?.label === label) out.at(-1)!.items.push(x);
+    else out.push({ label, items: [x] });
   }
-  const items = view === 'bookmarks' ? bookmarks : history;
-  return items
-    .filter((i) => match(i.title, i.url))
-    .map((i) => ({
-      title: i.title,
-      sub: prettyUrl(i.url),
-      meta: timeAgo(i.ts),
-      open: () => {
-        bro.navigate(i.url);
-        bro.closeLibrary();
-      },
-      remove:
-        view === 'bookmarks' ? { label: 'Remove bookmark', run: () => bro.removeBookmark(i.url) } : undefined,
-    }));
+  return out;
 }
-
-function render(): void {
-  renderProfileNote();
-  if (view === 'downloads') return renderDownloads();
-  if (view === 'offline') return renderOffline();
-  const list = rows();
-  listEl.replaceChildren();
-  emptyEl.hidden = list.length > 0;
-  emptyEl.textContent =
-    view === 'sessions' && !filter
-      ? 'No saved sessions yet. Name the tabs you have open and save them above.'
-      : 'Nothing here yet.';
-
-  for (const item of list) {
-    const row = document.createElement('div');
-    row.className = 'lib-item';
-
-    const main = document.createElement('button');
-    main.className = 'lib-item-main';
-    if (item.tooltip) main.title = item.tooltip;
-    main.addEventListener('click', item.open);
-
-    const title = document.createElement('span');
-    title.className = 'lib-item-title';
-    title.textContent = item.title;
-    const sub = document.createElement('span');
-    sub.className = 'lib-item-url';
-    sub.textContent = item.sub;
-    const meta = document.createElement('span');
-    meta.className = 'lib-item-meta';
-    meta.textContent = item.meta;
-
-    main.appendChild(title);
-    main.appendChild(sub);
-    main.appendChild(meta);
-    row.appendChild(main);
-
-    if (item.remove) {
-      const { label, run } = item.remove;
-      const del = document.createElement('button');
-      del.className = 'lib-item-del';
-      del.textContent = '✕';
-      del.title = label;
-      del.addEventListener('click', (e) => {
-        e.stopPropagation();
-        run();
-      });
-      row.appendChild(del);
-    }
-
-    listEl.appendChild(row);
-  }
-}
-
-/** Bookmarks + history belong to a profile; say whose they are when there are several. */
-function renderProfileNote(): void {
-  const p = profiles && profiles.profiles.length > 1 ? profiles.profiles.find((x) => x.id === profiles!.current) : null;
-  profileNote.hidden = !p || (view !== 'bookmarks' && view !== 'history');
-  if (p) profileNote.textContent = `Showing ${view} of the ${p.name} profile.`;
-}
-
-// --- Downloads -------------------------------------------------------------
 
 const fmtBytes = (n: number): string => {
   if (n < 0) return '?';
@@ -228,98 +174,348 @@ const fmtBytes = (n: number): string => {
 };
 const fmtTime = (s: number): string =>
   s < 60 ? `${Math.ceil(s)} s` : s < 3600 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`;
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+function prettyUrl(u: string): string {
+  if (/^magnet:/i.test(u)) return 'magnet link';
+  try {
+    return new URL(u).host + new URL(u).pathname.replace(/\/$/, '');
+  } catch {
+    return u;
+  }
+}
+
+function setEmpty(show: boolean, text: string): void {
+  emptyEl.hidden = !show;
+  $('empty-text').textContent = text;
+}
+
+// --- Bookmarks / History / Sessions ------------------------------------------
+
+interface Row {
+  title: string;
+  sub: string;
+  meta: string;
+  ts: number;
+  tooltip?: string;
+  open: () => void;
+  remove?: { label: string; run: () => void };
+}
+
+function rows(): Row[] {
+  const match = (...texts: string[]) => !filter || texts.some((t) => t.toLowerCase().includes(filter));
+  if (view === 'sessions') {
+    return sessions
+      .filter((s) => match(s.name, ...s.tabs.flatMap((t) => [t.title, t.url])))
+      .map((s) => ({
+        title: s.name,
+        sub: `${plural(s.tabs.length, 'tab')} · ${s.tabs
+          .slice(0, 3)
+          .map((t) => t.title || prettyUrl(t.url))
+          .join(', ')}${s.tabs.length > 3 ? ', …' : ''}`,
+        meta: timeAgo(s.ts),
+        ts: s.ts,
+        tooltip: s.tabs.map((t) => t.title || t.url).join('\n'),
+        open: () => bro.openSession(s.id),
+        remove: { label: 'Delete session', run: () => bro.removeSession(s.id) },
+      }));
+  }
+  const items = view === 'bookmarks' ? bookmarks : history;
+  return items
+    .filter((i) => match(i.title, i.url))
+    .map((i) => ({
+      title: i.title || prettyUrl(i.url),
+      sub: prettyUrl(i.url),
+      meta: view === 'history' ? clock(i.ts) : timeAgo(i.ts),
+      ts: i.ts,
+      tooltip: i.url,
+      open: () => {
+        bro.navigate(i.url);
+        bro.closeLibrary();
+      },
+      remove: view === 'bookmarks' ? { label: 'Remove bookmark', run: () => bro.removeBookmark(i.url) } : undefined,
+    }));
+}
+
+function render(): void {
+  renderProfileNote();
+  if (view === 'downloads') return renderDownloads();
+  if (view === 'offline') return renderOffline();
+  const list = rows();
+  setEmpty(
+    list.length === 0,
+    filter
+      ? 'No results found.'
+      : view === 'sessions'
+        ? 'No saved sessions yet. Name the tabs you have open and save them above.'
+        : view === 'history'
+          ? 'Pages you visit will appear here.'
+          : 'Bookmark pages with the star in the address bar (Ctrl/Cmd+D).',
+  );
+  const groups = view === 'history' ? byDay(list, (r) => r.ts) : [{ label: '', items: list }];
+  listEl.replaceChildren(
+    ...groups.flatMap((g) => [
+      ...(g.label ? [h('h3', { className: 'group-title' }, g.label)] : []),
+      ...(g.items.length ? [h('div', { className: 'card list-card' }, ...g.items.map(rowEl))] : []),
+    ]),
+  );
+}
+
+function rowEl(item: Row): HTMLElement {
+  const main = h(
+    'button',
+    { className: 'lib-item-main', title: item.tooltip ?? '', onclick: item.open },
+    h('span', { className: 'lib-item-title' }, item.title),
+    h('span', { className: 'lib-item-url' }, item.sub),
+    h('span', { className: 'lib-item-meta' }, item.meta),
+  );
+  const row = h('div', { className: 'lib-item' }, main);
+  if (item.remove) {
+    const { label, run } = item.remove;
+    const del = h('button', { className: 'icon-btn round', title: label, ariaLabel: label }, icon('i-x'));
+    del.addEventListener('click', (e) => {
+      e.stopPropagation();
+      run();
+    });
+    row.appendChild(del);
+  }
+  return row;
+}
+
+/** Bookmarks + history belong to a profile; say whose they are when there are several. */
+function renderProfileNote(): void {
+  const p = profiles && profiles.profiles.length > 1 ? profiles.profiles.find((x) => x.id === profiles!.current) : null;
+  profileNote.hidden = !p || (view !== 'bookmarks' && view !== 'history');
+  if (p) profileNote.textContent = `Showing ${view} of the ${p.name} profile.`;
+}
+
+// --- Downloads -------------------------------------------------------------
+
+const PRIORITY_LABEL: Record<DownloadPriority, string> = { high: 'High', normal: 'Normal', low: 'Low' };
 
 function downloadLine(d: DownloadInfo): string {
-  const size = d.total > 0 ? `${fmtBytes(d.received)} of ${fmtBytes(d.total)}` : fmtBytes(d.received);
+  const size = d.total > 0 ? `${fmtBytes(d.received)} of ${fmtBytes(d.total)}` : d.received > 0 ? fmtBytes(d.received) : '';
+  const join = (...parts: (string | false | undefined)[]) => parts.filter(Boolean).join(' · ');
   switch (d.status) {
+    case 'queued':
+      return join('Queued — starts when a download finishes', size);
     case 'downloading': {
-      const parts = [size];
-      if (d.speed > 0) {
-        parts.push(`${fmtBytes(d.speed)}/s`);
-        if (d.total > 0) parts.push(`${fmtTime((d.total - d.received) / d.speed)} left`);
-      } else parts.push('starting…');
-      if (d.engine === 'segmented') parts.push(`${d.connections} connection${d.connections === 1 ? '' : 's'}`);
-      if (d.retries) parts.push(`${d.retries} retr${d.retries === 1 ? 'y' : 'ies'}`);
-      return parts.join(' · ');
+      if (d.engine === 'torrent' && d.total < 0) return join('Getting torrent info from peers…', plural(d.connections, 'peer'));
+      const speed = d.speed > 0 && `${fmtBytes(d.speed)}/s`;
+      const left = d.speed > 0 && d.total > 0 && `${fmtTime((d.total - d.received) / d.speed)} left`;
+      const conns =
+        d.engine === 'torrent'
+          ? d.connections
+            ? plural(d.connections, 'peer')
+            : 'looking for peers…'
+          : d.engine === 'segmented' && plural(d.connections, 'connection');
+      return join(size, speed || (d.engine !== 'torrent' && 'starting…'), left, conns, d.retries > 0 && plural(d.retries, 'retry', 'retries'));
     }
     case 'paused':
-      return `Paused · ${size}${d.resumable ? ' · resumable' : ''}`;
+      return join('Paused', size);
     case 'interrupted':
-      return `Interrupted · ${size} · ${d.error ?? 'retrying'}`;
+      return join('Interrupted', size, d.error ?? 'retrying');
     case 'completed':
-      return `${fmtBytes(d.total > 0 ? d.total : d.received)} · done ${timeAgo(d.finished ?? d.started)}`;
+      return join(fmtBytes(d.total > 0 ? d.total : d.received), `Done ${timeAgo(d.finished ?? d.started)}`);
     case 'cancelled':
       return 'Cancelled';
     case 'failed':
-      return `Failed · ${d.error ?? 'unknown error'}`;
+      return join('Failed', d.error ?? 'unknown error');
   }
+}
+
+/** File-type tile: "ZIP" on amber, "MP4" on red… (Chrome shows the file's icon). */
+const KINDS: [RegExp, string][] = [
+  [/^(zip|rar|7z|tar|gz|tgz|bz2|xz|iso)$/, 'archive'],
+  [/^(mp4|mkv|webm|avi|mov|m4v|wmv|flv|ts)$/, 'video'],
+  [/^(mp3|flac|wav|m4a|aac|ogg|opus)$/, 'audio'],
+  [/^(png|jpe?g|gif|webp|svg|bmp|ico|heic|avif)$/, 'image'],
+  [/^(pdf)$/, 'pdf'],
+  [/^(docx?|odt|rtf|txt|md|xlsx?|csv|pptx?)$/, 'doc'],
+  [/^(exe|msi|dmg|pkg|appx|deb|rpm|apk)$/, 'app'],
+];
+function fileTile(d: DownloadInfo): HTMLElement {
+  if (d.engine === 'torrent') return h('div', { className: 'file-tile kind-torrent', title: 'Torrent' }, icon('i-magnet'));
+  const m = /\.([a-z0-9]{1,5})$/i.exec(d.filename);
+  const ext = m ? m[1].toLowerCase() : '';
+  const kind = KINDS.find(([re]) => re.test(ext))?.[1] ?? 'file';
+  return h('div', { className: `file-tile kind-${kind}` }, ext ? ext.toUpperCase().slice(0, 4) : icon('i-download'));
+}
+
+interface Card {
+  el: HTMLElement;
+  shape: string;
+  update: (d: DownloadInfo) => void;
+}
+const cards = new Map<string, Card>();
+/** Last list layout (days, ids, card shapes): cards are only re-laid out when it changes. */
+let dlLayout = '';
+const isLive = (d: DownloadInfo) => d.status === 'queued' || d.status === 'downloading' || d.status === 'paused' || d.status === 'interrupted';
+/** What decides a card's buttons — when it changes the card is rebuilt; otherwise it's updated in place. */
+const shapeOf = (d: DownloadInfo) => [d.status, d.engine, d.resumable, d.forced].join('|');
+
+function buildCard(d: DownloadInfo): Card {
+  const id = d.id;
+  const done = d.status === 'completed';
+  const name = done
+    ? h('button', { className: 'dl-name link', onclick: () => bro.downloadAction(id, 'open') })
+    : h('span', { className: 'dl-name' });
+  if (done) name.dataset.action = 'open';
+  const tag = h('span', { className: 'dl-tag' });
+  const url = h('span', { className: 'dl-url' });
+  const fill = h('div', { className: 'dl-fill' });
+  const bar = h('div', { className: 'dl-bar' }, fill);
+  const meta = h('div', { className: 'dl-meta' });
+
+  const links = h('div', { className: 'dl-links' });
+  const act = (label: string, action: DownloadAction, title = label) => {
+    const b = h('button', { className: 'link-btn', textContent: label, title, onclick: () => bro.downloadAction(id, action) });
+    b.dataset.action = action;
+    links.appendChild(b);
+  };
+  const canPause = d.engine !== 'browser' || d.resumable;
+  switch (d.status) {
+    case 'queued':
+      act('Start now', 'start-now', 'Start it now, without waiting for its turn');
+      act('Pause', 'pause');
+      act('Cancel', 'cancel');
+      break;
+    case 'downloading':
+      if (canPause) act('Pause', 'pause');
+      act('Cancel', 'cancel');
+      break;
+    case 'paused':
+    case 'interrupted':
+      act('Resume', 'resume');
+      act('Cancel', 'cancel');
+      break;
+    case 'completed':
+      act('Show in folder', 'show');
+      break;
+    default:
+      act('Retry', 'retry');
+  }
+
+  const side = h('div', { className: 'dl-side' });
+  let prio: HTMLSelectElement | null = null;
+  if (isLive(d)) {
+    prio = h(
+      'select',
+      { className: 'prio', title: 'Priority: queued downloads start in this order', ariaLabel: 'Priority' },
+      ...DOWNLOAD_PRIORITIES.map((p) => h('option', { value: p }, PRIORITY_LABEL[p])),
+    );
+    const sel = prio;
+    sel.addEventListener('change', () => {
+      sel.dataset.p = sel.value;
+      bro.setDownloadPriority(id, sel.value as DownloadPriority);
+    });
+    side.appendChild(sel);
+  }
+  side.appendChild(
+    h('button', {
+      className: 'icon-btn round',
+      title: 'Remove from list (keeps the file)',
+      ariaLabel: 'Remove from list',
+      onclick: () => bro.downloadAction(id, 'remove'),
+    }, icon('i-x')),
+  );
+
+  const main = h('div', { className: 'dl-main' }, h('div', { className: 'dl-title' }, name, tag), url, bar, meta, links);
+  const el = h('div', { className: 'card dl-card' }, fileTile(d), main, side);
+
+  const update = (d: DownloadInfo) => {
+    el.className = `card dl-card dl-item dl-${d.status}${d.forced ? ' forced' : ''}`;
+    name.textContent = d.filename;
+    name.title = d.path;
+    url.textContent = prettyUrl(d.url);
+    url.title = d.url;
+    const tags = [d.engine === 'torrent' && 'Torrent', d.forced && 'Started now', d.private && 'Private'].filter(Boolean);
+    tag.textContent = tags.join(' · ');
+    tag.hidden = !tags.length;
+    meta.textContent = downloadLine(d);
+    meta.title = meta.textContent;
+    bar.hidden = !isLive(d);
+    fill.classList.toggle('indeterminate', d.total <= 0 && d.status === 'downloading');
+    fill.style.width = d.total > 0 ? `${Math.min(100, (d.received / d.total) * 100).toFixed(1)}%` : d.status === 'downloading' ? '' : '0';
+    if (prio && document.activeElement !== prio) {
+      prio.value = d.priority;
+      prio.dataset.p = d.priority;
+    }
+  };
+  update(d);
+  return { el, shape: shapeOf(d), update };
 }
 
 function renderDownloads(): void {
   const list = downloads.filter(
     (d) => !filter || d.filename.toLowerCase().includes(filter) || d.url.toLowerCase().includes(filter),
   );
-  listEl.replaceChildren();
-  emptyEl.hidden = list.length > 0;
-  emptyEl.textContent = filter
-    ? 'Nothing matches.'
-    : 'No downloads yet. Files you download (or “Save … as” from the right-click menu) appear here.';
-  for (const d of list) {
-    const row = document.createElement('div');
-    row.className = `dl-item dl-${d.status}`;
-    row.dataset.id = d.id;
+  setEmpty(
+    list.length === 0,
+    filter
+      ? 'No downloads match your search.'
+      : 'Files you download appear here. Paste a link or a magnet link above to start one.',
+  );
+  renderSummary();
 
-    const name = document.createElement(d.status === 'completed' ? 'button' : 'span');
-    name.className = 'dl-name';
-    name.textContent = d.filename;
-    name.title = d.path;
-    if (d.status === 'completed') name.addEventListener('click', () => bro.downloadAction(d.id, 'open'));
-
-    const meta = document.createElement('span');
-    meta.className = 'dl-meta';
-    meta.textContent = downloadLine(d) + (d.private ? ' · private' : '');
-
-    const bar = document.createElement('div');
-    bar.className = 'dl-bar';
-    const fill = document.createElement('div');
-    fill.className = 'dl-fill';
-    if (d.total > 0) fill.style.width = `${Math.min(100, (d.received / d.total) * 100).toFixed(1)}%`;
-    else fill.classList.add('indeterminate');
-    bar.appendChild(fill);
-
-    const actions = document.createElement('div');
-    actions.className = 'dl-actions';
-    const act = (label: string, action: DownloadAction, title = label) => {
-      const b = document.createElement('button');
-      b.className = 'text-btn small';
-      b.textContent = label;
-      b.title = title;
-      b.dataset.action = action;
-      b.addEventListener('click', () => bro.downloadAction(d.id, action));
-      actions.appendChild(b);
-    };
-    if (d.status === 'downloading') {
-      if (d.engine === 'segmented' || d.resumable) act('Pause', 'pause');
-      act('Cancel', 'cancel');
-    } else if (d.status === 'paused' || d.status === 'interrupted') {
-      act('Resume', 'resume');
-      act('Cancel', 'cancel');
-    } else if (d.status === 'completed') {
-      act('Open', 'open');
-      act('Show in folder', 'show');
-    } else {
-      act('Retry', 'retry');
+  const groups = byDay(list, (d) => d.started);
+  const layout = groups.map((g) => `${g.label}:${g.items.map((d) => `${d.id}=${shapeOf(d)}`).join(',')}`).join('|');
+  if (layout !== dlLayout) {
+    const seen = new Set<string>();
+    const nodes: HTMLElement[] = [];
+    for (const g of groups) {
+      nodes.push(h('h3', { className: 'group-title' }, g.label));
+      for (const d of g.items) {
+        let c = cards.get(d.id);
+        if (!c || c.shape !== shapeOf(d)) {
+          c = buildCard(d);
+          cards.set(d.id, c);
+        }
+        seen.add(d.id);
+        nodes.push(c.el);
+      }
     }
-    act('✕', 'remove', 'Remove from list (keeps the file)');
-
-    const main = document.createElement('div');
-    main.className = 'dl-main';
-    main.append(name, meta);
-    if (d.status === 'downloading' || d.status === 'paused' || d.status === 'interrupted') main.appendChild(bar);
-    row.append(main, actions);
-    listEl.appendChild(row);
+    for (const id of [...cards.keys()]) if (!seen.has(id)) cards.delete(id);
+    listEl.replaceChildren(...nodes);
+    dlLayout = layout;
   }
+  for (const d of list) cards.get(d.id)?.update(d);
 }
+
+function renderSummary(): void {
+  const running = downloads.filter((d) => d.status === 'downloading').length;
+  const queued = downloads.filter((d) => d.status === 'queued').length;
+  const paused = downloads.filter((d) => d.status === 'paused' || d.status === 'interrupted').length;
+  const speed = downloads.reduce((a, d) => a + (d.status === 'downloading' ? d.speed : 0), 0);
+  const max = prefs?.maxDownloads ?? 4;
+  const parts = [
+    running ? `${running} downloading${speed > 0 ? ` at ${fmtBytes(speed)}/s` : ''}` : 'Nothing downloading',
+    queued && `${queued} queued`,
+    paused && `${paused} paused`,
+    `up to ${max} at a time`,
+  ].filter(Boolean);
+  $('dl-summary-text').textContent = parts.join(' · ');
+  $<HTMLButtonElement>('dl-pause-all').disabled = running + queued === 0;
+  $<HTMLButtonElement>('dl-resume-all').disabled = paused === 0;
+  $<HTMLButtonElement>('clear-downloads').disabled = !downloads.some((d) => !isLive(d));
+  const count = $('nav-dl-count');
+  count.hidden = running + queued === 0;
+  count.textContent = String(running + queued);
+}
+
+$('dl-pause-all').addEventListener('click', () => bro.pauseAllDownloads());
+$('dl-resume-all').addEventListener('click', () => bro.resumeAllDownloads());
+$('dl-open-folder').addEventListener('click', () => bro.openDownloadsFolder());
+$<HTMLFormElement>('dl-add').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const input = $<HTMLInputElement>('dl-add-url');
+  const msg = $('dl-add-msg');
+  if (!input.value.trim()) return;
+  const err = await bro.addDownload(input.value);
+  msg.textContent = err ?? '';
+  msg.classList.toggle('err', !!err);
+  if (!err) input.value = '';
+});
 
 // --- Offline (saved pages + videos) ------------------------------------------
 
@@ -351,84 +547,76 @@ function offlineLine(o: OfflineItem): string {
 
 function renderOffline(): void {
   const list = offline.filter((o) => !filter || o.title.toLowerCase().includes(filter) || o.pageUrl.toLowerCase().includes(filter));
-  listEl.replaceChildren();
-  emptyEl.hidden = list.length > 0;
-  emptyEl.textContent = filter
-    ? 'Nothing matches.'
-    : 'Nothing saved yet. On any page with a video (a course, a talk, a tutorial), press Ctrl/Cmd+S or the ' +
-      'Save for offline button next to Downloads. Bro keeps the page and the video in your Downloads folder ' +
-      'under “Bro Offline”, and you can watch it here without internet.';
-  for (const o of list) {
-    const row = document.createElement('div');
-    row.className = `dl-item dl-${o.status === 'working' || o.status === 'queued' ? 'downloading' : o.status}`;
-    row.dataset.id = o.id;
-
-    const done = o.status === 'completed';
-    const name = document.createElement(done ? 'button' : 'span');
-    name.className = 'dl-name';
-    name.textContent = o.title;
-    name.title = `${o.pageUrl}
-${o.folder}`;
-    if (done) name.addEventListener('click', () => bro.offlineAction(o.id, 'open'));
-
-    const meta = document.createElement('span');
-    meta.className = 'dl-meta';
-    meta.textContent = offlineLine(o) + (o.private ? ' · private' : '');
-    meta.title = meta.textContent;
-
-    const main = document.createElement('div');
-    main.className = 'dl-main';
-    main.append(name, meta);
-    if (o.status === 'working') {
-      const bar = document.createElement('div');
-      bar.className = 'dl-bar';
-      const fill = document.createElement('div');
-      fill.className = 'dl-fill';
-      if (o.total > 0) fill.style.width = `${Math.min(100, (o.received / o.total) * 100).toFixed(1)}%`;
-      else fill.classList.add('indeterminate');
-      bar.appendChild(fill);
-      main.appendChild(bar);
-    }
-
-    const actions = document.createElement('div');
-    actions.className = 'dl-actions';
-    const act = (label: string, action: OfflineAction, title = label) => {
-      const b = document.createElement('button');
-      b.className = 'text-btn small';
-      b.textContent = label;
-      b.title = title;
-      b.dataset.action = action;
-      b.addEventListener('click', () => {
-        if (action === 'delete' && !confirm(`Delete “${o.title}” and its saved files from your computer?`)) return;
-        bro.offlineAction(o.id, action);
-      });
-      actions.appendChild(b);
-    };
-    if (o.status === 'working' || o.status === 'queued') {
-      act('Pause', 'pause');
-      act('Cancel', 'cancel');
-    } else if (o.status === 'paused' || o.status === 'interrupted') {
-      act('Resume', 'resume');
-      act('Cancel', 'cancel');
-    } else if (done) {
-      act(o.videos ? 'Watch' : 'Open', 'open');
-      act('Show folder', 'show');
-      act('Delete', 'delete', 'Delete the saved files');
-    } else {
-      act('Retry', 'retry');
-    }
-    act('✕', 'remove', 'Remove from list (keeps the files)');
-    row.append(main, actions);
-    listEl.appendChild(row);
-  }
+  setEmpty(
+    list.length === 0,
+    filter
+      ? 'Nothing matches.'
+      : 'Nothing saved yet. On any page with a video (a course, a talk, a tutorial), press Ctrl/Cmd+S or the ' +
+        'Save-for-offline button in the toolbar. Bro keeps the page and the video under “Bro Offline” in your ' +
+        'download folder, and you can watch it here without internet.',
+  );
+  listEl.replaceChildren(
+    ...byDay(list, (o) => o.started).flatMap((g) => [
+      h('h3', { className: 'group-title' }, g.label),
+      ...g.items.map(offlineCard),
+    ]),
+  );
 }
 
-function prettyUrl(u: string): string {
-  try {
-    return new URL(u).host + new URL(u).pathname.replace(/\/$/, '');
-  } catch {
-    return u;
+function offlineCard(o: OfflineItem): HTMLElement {
+  const done = o.status === 'completed';
+  const running = o.status === 'working' || o.status === 'queued';
+  const name = done
+    ? h('button', { className: 'dl-name link', textContent: o.title, onclick: () => bro.offlineAction(o.id, 'open') })
+    : h('span', { className: 'dl-name', textContent: o.title });
+  name.title = `${o.pageUrl}\n${o.folder}`;
+  const meta = h('div', { className: 'dl-meta', textContent: offlineLine(o) + (o.private ? ' · private' : '') });
+  meta.title = meta.textContent ?? '';
+
+  const main = h('div', { className: 'dl-main' }, h('div', { className: 'dl-title' }, name), h('span', { className: 'dl-url', textContent: prettyUrl(o.pageUrl) }));
+  if (o.status === 'working') {
+    const fill = h('div', { className: 'dl-fill' });
+    if (o.total > 0) fill.style.width = `${Math.min(100, (o.received / o.total) * 100).toFixed(1)}%`;
+    else fill.classList.add('indeterminate');
+    main.appendChild(h('div', { className: 'dl-bar' }, fill));
   }
+  main.appendChild(meta);
+
+  const links = h('div', { className: 'dl-links' });
+  const act = (label: string, action: OfflineAction, title = label) =>
+    links.appendChild(
+      h('button', {
+        className: 'link-btn' + (action === 'delete' ? ' danger' : ''),
+        textContent: label,
+        title,
+        onclick: () => {
+          if (action === 'delete' && !confirm(`Delete “${o.title}” and its saved files from your computer?`)) return;
+          bro.offlineAction(o.id, action);
+        },
+      }),
+    );
+  if (running) {
+    act('Pause', 'pause');
+    act('Cancel', 'cancel');
+  } else if (o.status === 'paused' || o.status === 'interrupted') {
+    act('Resume', 'resume');
+    act('Cancel', 'cancel');
+  } else if (done) {
+    act(o.videos ? 'Watch' : 'Open', 'open');
+    act('Show in folder', 'show');
+    act('Delete files', 'delete', 'Delete the saved files');
+  } else {
+    act('Retry', 'retry');
+  }
+  main.appendChild(links);
+
+  const side = h(
+    'div',
+    { className: 'dl-side' },
+    h('button', { className: 'icon-btn round', title: 'Remove from list (keeps the files)', ariaLabel: 'Remove from list', onclick: () => bro.offlineAction(o.id, 'remove') }, icon('i-x')),
+  );
+  const tile = h('div', { className: 'file-tile kind-video' }, icon('i-offline'));
+  return h('div', { className: `card dl-card dl-${running ? 'downloading' : o.status}` }, tile, main, side);
 }
 
 // --- Data sync -------------------------------------------------------------
@@ -436,11 +624,11 @@ bro.onBookmarksChanged((b) => {
   bookmarks = b;
   if (view === 'bookmarks') render();
 });
-bro.onHistoryChanged((h) => {
-  history = h;
+bro.onHistoryChanged((hist) => {
+  history = hist;
   if (view === 'history') render();
 });
-// Progress redraws the list ~2x a second; never swap a row out from under a click.
+// Offline progress redraws the list ~2x a second; never swap a row out from under a click.
 let pressing = false;
 let redrawPending = false;
 listEl.addEventListener('pointerdown', () => (pressing = true));
@@ -453,7 +641,7 @@ window.addEventListener('pointerup', () => {
 });
 bro.onDownloadsChanged((d) => {
   downloads = d;
-  if (view !== 'downloads') return;
+  if (view !== 'downloads') return renderSummary();
   if (pressing) redrawPending = true;
   else render();
 });
@@ -462,6 +650,14 @@ bro.onOfflineChanged((o) => {
   if (view !== 'offline') return;
   if (pressing) redrawPending = true;
   else render();
+});
+bro.onPrefsChanged((p) => {
+  prefs = p;
+  renderSummary();
+});
+void bro.getPrefs().then((p) => {
+  prefs = p;
+  renderSummary();
 });
 void bro.getOffline().then((o) => {
   offline = o;
@@ -474,6 +670,7 @@ bro.onProfilesChanged((p) => {
 void bro.getDownloads().then((d) => {
   downloads = d;
   if (view === 'downloads') render();
+  else renderSummary();
 });
 void bro.getProfiles().then((p) => {
   profiles = p;
@@ -487,13 +684,20 @@ bro.onSessionsChanged((s) => {
 
 void bro.getBookmarks().then((b) => {
   bookmarks = b;
-  render();
+  if (view === 'bookmarks') render();
 });
-void bro.getHistory().then((h) => {
-  history = h;
+void bro.getHistory().then((hist) => {
+  history = hist;
   if (view === 'history') render();
 });
 void bro.getSessions().then((s) => {
   sessions = s;
   if (view === 'sessions') render();
 });
+
+// Opened on a specific view (Ctrl/Cmd+H → History, Ctrl/Cmd+Shift+D → Sessions, bro://downloads …).
+bro.onLibraryView(setView);
+{
+  const start = location.hash.slice(1) as LibraryView;
+  setView(inTab && start in VIEWS ? start : inTab ? 'downloads' : 'bookmarks');
+}

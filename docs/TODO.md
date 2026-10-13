@@ -22,16 +22,23 @@ _Nothing right now._
   uBlock (installed in the dev profile) logs errors because of it. Reinstalling
   the extension does not help. Could be shimmed from `webContents` navigation events.
 
-- [ ] **Download queue + limits** (like Free Download Manager) — requested 2026-10-12:
-  - [ ] Max simultaneous downloads (e.g. 3); extra ones wait in a queue and start automatically.
-  - [ ] Priority per download (High / Normal / Low) + move up/down in the queue; high
-        priority gets connections first.
+- [~] **Download queue + limits** (like Free Download Manager) — requested 2026-10-12:
+  - [x] 2026-10-13 Max simultaneous downloads (Settings → Downloads, 1–10, default 4); extra ones
+        wait in a queue and start automatically. "Start now" skips the queue.
+  - [x] 2026-10-13 Priority per download (High / Normal / Low) — sets the queue order.
+  - [ ] Move up/down within a priority; high priority also getting more connections.
   - [ ] Global speed limit (e.g. cap Bro's downloads at 2 MB/s so browsing stays fast) and
-        optional per-download limit.
-  - [ ] Pause all / Resume all; “start queued downloads at a set time” (scheduler).
-  - [ ] Where: `src/main/downloads.ts` (queue + token-bucket throttle in `SegmentedJob`;
-        Chromium-engine items can only be paused/resumed, not throttled), Downloads view
-        controls, Settings → Downloads.
+        optional per-download limit (token bucket in `SegmentedJob`; Chromium-engine items can
+        only be paused/resumed, not throttled; WebTorrent has `throttleDownload`).
+  - [x] 2026-10-13 Pause all / Resume all.  [ ] “Start queued downloads at a set time” (scheduler).
+
+- [ ] **Torrents — follow-ups** (magnet + .torrent support done 2026-10-13):
+  - [ ] Optional seeding (ratio / time limit) — today a torrent stops when it finishes.
+  - [ ] Pick which files of a multi-file torrent to download.
+  - [ ] Cancelling a *paused* torrent keeps its partial files (only a running one is deleted).
+  - [ ] Real-world swarm not tested on this network (BitTorrent traffic seems blocked here: no
+        peers for a public torrent); tested end to end with a local tracker + seeder.
+  - [ ] Packaging: check `npm run pack` keeps `utp-native`'s prebuilt `.node` outside the asar.
 
 - [ ] **Save for offline — follow-ups** (feature done 2026-10-13, see Done):
   - [ ] Pick which video when a page has several streams (today: yt-dlp's choice, else manifests
@@ -71,6 +78,11 @@ _Nothing right now._
   only `winCodeSign-2.6.0` is needed.
 
 ## Done
+
+- [x] 2026-10-13 Chrome-style Settings and Library/Downloads pages (header search, side nav, cards,
+  switches; downloads grouped by day with file-type tiles, priority menu, "New download" box for
+  links and magnets). Toolbar: SVG icons; Downloads button always shown with a progress ring;
+  Save-for-offline no longer greyed out on non-video pages (a dot marks a found video).
 
 - [x] 2026-10-13 Library as a page in a tab, like Chrome: **Ctrl+J → bro://downloads**, **Ctrl+Shift+J →
   bro://offline** (one Library tab, reused; Bookmarks menu has both). Library tabs carry the bridge

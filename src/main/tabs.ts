@@ -86,7 +86,7 @@ export function resolveInput(raw: string, search: SearchConfig = DEFAULT_SEARCH)
   if (!input) return START_URL;
   const page = /^bro:\/\/([a-z]+)\/?$/i.exec(input);
   if (page && LIBRARY_VIEWS.includes(page[1].toLowerCase())) return `${LIBRARY_URL}?tab=1#${page[1].toLowerCase()}`;
-  if (/^(https?|file|about|view-source|chrome):/i.test(input)) return input;
+  if (/^(https?|file|about|view-source|chrome|magnet):/i.test(input)) return input;
 
   const fill = (tpl: string, q: string) => tpl.replace(/%s/g, encodeURIComponent(q));
   const kw = /^!?(\S+)\s+(.+)$/.exec(input);
@@ -135,6 +135,8 @@ export class TabManager {
   hasVideo: (wc: WebContents) => boolean = () => false;
   /** Preload with the `window.bro` bridge, for Library tabs. Set by Browser. */
   bridgePreload = '';
+  /** A magnet: link was clicked or typed (`wc` = the tab it came from). Set by Browser. */
+  onMagnet: (url: string, wc?: WebContents) => void = () => {};
 
   constructor(
     private win: BrowserWindow,
@@ -376,6 +378,7 @@ export class TabManager {
     const tab = this.tabs.find((t) => t.id === (id ?? this.activeId));
     if (!tab) return;
     const url = this.urlFor(tab, input);
+    if (/^magnet:/i.test(url)) return this.onMagnet(url, tab.view.webContents);
     if (tab.internal !== isLibraryUrl(url)) return this.replaceTab(tab, input);
     void tab.view.webContents.loadURL(url);
   }
@@ -535,6 +538,10 @@ export class TabManager {
     // start.html?q=… and we resolve that here, so keywords + the default
     // engine apply there too.
     wc.on('will-navigate', (e, url) => {
+      if (/^magnet:/i.test(url)) {
+        e.preventDefault();
+        return this.onMagnet(url, wc);
+      }
       // A Library tab never shows anything but the Library (it carries the privileged bridge).
       if (tab.internal && !isLibraryUrl(url)) {
         e.preventDefault();
@@ -554,6 +561,7 @@ export class TabManager {
     // target=_blank / window.open → open as a new tab instead of a popup.
     wc.setWindowOpenHandler(({ url }) => {
       if (/^https?:/i.test(url)) this.newTab(url, { private: tab.private, profileId: tab.profileId }); // links keep private/profile
+      else if (/^magnet:/i.test(url)) this.onMagnet(url, wc);
       else void shell.openExternal(url); // mailto:, etc.
       return { action: 'deny' };
     });

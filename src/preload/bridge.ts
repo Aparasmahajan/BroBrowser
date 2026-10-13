@@ -105,6 +105,11 @@ const api: BroApi = {
   downloadAction: (id, action) => ipcRenderer.send(Channel.DownloadCommand, { id, action }),
   clearDownloads: () => ipcRenderer.send(Channel.ClearDownloads),
   chooseDownloadDir: () => ipcRenderer.invoke(Channel.ChooseDownloadDir) as Promise<string | null>,
+  setDownloadPriority: (id, priority) => ipcRenderer.send(Channel.SetDownloadPriority, { id, priority }),
+  addDownload: (url) => ipcRenderer.invoke(Channel.AddDownload, url) as Promise<string | null>,
+  openDownloadsFolder: () => ipcRenderer.send(Channel.OpenDownloadsFolder),
+  pauseAllDownloads: () => ipcRenderer.send(Channel.PauseAllDownloads),
+  resumeAllDownloads: () => ipcRenderer.send(Channel.ResumeAllDownloads),
 
   showOfflineMenu: () => ipcRenderer.send(Channel.ShowOfflineMenu),
   saveOffline: (what) => ipcRenderer.send(Channel.SaveOffline, what),

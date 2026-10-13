@@ -1,4 +1,4 @@
-import { Menu, WebContentsView, session, type Session } from 'electron';
+import { Menu, WebContentsView, session, shell, type Session, type WebContents } from 'electron';
 import { join } from 'node:path';
 import type { MainWindow } from './window';
 import { CHROME_H } from './window';
@@ -36,6 +36,8 @@ const DEFAULT_PREFS: Prefs = {
   downloadDir: '',
   askWhereToSave: false,
   downloadConnections: 8,
+  maxDownloads: 4,
+  torrents: true,
   videoQuality: 720,
   videoSubtitles: true,
 };
@@ -163,6 +165,7 @@ export class Browser {
     );
     this.tabs.search = () => this.search.get();
     this.tabs.bridgePreload = BRIDGE_PRELOAD; // Library tabs (bro://downloads, bro://offline)
+    this.tabs.onMagnet = (url, wc) => void this.openMagnet(url, wc);
     this.tabs.onChanged = () => {
       this.autosave();
       this.syncProfile();
@@ -530,10 +533,44 @@ export class Browser {
     if (typeof p.downloadConnections === 'number' && Number.isFinite(p.downloadConnections)) {
       next.downloadConnections = Math.min(16, Math.max(1, Math.round(p.downloadConnections)));
     }
+    if (typeof p.maxDownloads === 'number' && Number.isFinite(p.maxDownloads)) {
+      next.maxDownloads = Math.min(10, Math.max(1, Math.round(p.maxDownloads)));
+    }
+    if (typeof p.torrents === 'boolean') next.torrents = p.torrents;
     if (typeof p.videoQuality === 'number' && VIDEO_QUALITIES.some(([q]) => q === p.videoQuality)) next.videoQuality = p.videoQuality;
     if (typeof p.videoSubtitles === 'boolean') next.videoSubtitles = p.videoSubtitles;
     this.prefs.set(next);
     this.send(Event.PrefsChanged, next);
+    this.downloads.schedule(); // a higher limit starts queued downloads right away
+  }
+
+  // --- Downloads ---------------------------------------------------------------
+
+  /** Downloads page → "New download": a web address or a magnet link, in the profile on screen. */
+  addDownload(raw: string): string | null {
+    const url = raw.trim();
+    if (/^magnet:/i.test(url)) return this.openMagnet(url);
+    if (!/^https?:\/\/\S+$/i.test(url)) return 'Paste a web address (https://…) or a magnet link.';
+    this.currentSession().downloadURL(url);
+    return null;
+  }
+
+  /** A magnet link was clicked or typed. `wc` = the tab it came from (private tabs stay private). */
+  openMagnet(url: string, wc?: WebContents): string | null {
+    if (!this.getPrefs().torrents) {
+      void shell.openExternal(url).catch(() => {}); // the system's torrent app
+      return null;
+    }
+    const ctx = wc && this.tabs.contextOf(wc);
+    const isPrivate = !!ctx?.private;
+    const profileId = ctx?.profileId ?? this.currentProfile();
+    const err = this.downloads.addTorrent(url, {
+      private: isPrivate,
+      profileId,
+      partition: isPrivate ? PRIVATE_PARTITION : this.profiles.partition(profileId),
+    });
+    if (!err && wc) this.openLibraryTab('downloads'); // show it, like a download starting
+    return err;
   }
 
   // --- Layout --------------------------------------------------------------

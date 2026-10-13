@@ -38,6 +38,8 @@ const targets = [
       'electron-chrome-web-store',
       'electron-chrome-web-store/*',
       'electron-chrome-context-menu',
+      // ESM-only with optional native add-ons; loaded with import() on the first torrent.
+      'webtorrent',
     ],
   },
   {
