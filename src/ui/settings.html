@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Settings</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="settings">
+    <div class="settings-sheet wide">
+      <header class="settings-head">
+        <h1>Settings</h1>
+        <button id="close" class="icon-btn" title="Close (Esc)" aria-label="Close">&#x2715;</button>
+      </header>
+
+      <nav class="settings-nav">
+        <a href="#privacy">Privacy</a>
+        <a href="#appearance">Appearance</a>
+        <a href="#profiles">Profiles</a>
+        <a href="#startup">On startup</a>
+        <a href="#downloads">Downloads</a>
+        <a href="#search">Search</a>
+        <a href="#shortcuts">Shortcuts</a>
+        <a href="#data">Your data</a>
+      </nav>
+
+      <section class="group" id="privacy">
+        <h2>Privacy</h2>
+
+        <div class="row">
+          <div class="row-label">
+            <strong>Hidden from screen share</strong>
+            <small id="capture-detail"></small>
+          </div>
+          <button id="capture-pill" class="pill" role="switch" aria-checked="true">
+            <span class="dot"></span><span id="capture-text">ON</span>
+          </button>
+        </div>
+
+        <p class="note">
+          Hides this window from <em>software</em> screen capture (Teams, Meet, Zoom, OBS,
+          screen recorders). It does <strong>not</strong> hide from a phone camera or an
+          HDMI capture card. Only record or share meetings where you have consent.
+        </p>
+
+        <div class="row">
+          <div class="row-label">
+            <strong>Block ads &amp; trackers</strong>
+            <small id="adblock-detail">Loading filter lists…</small>
+          </div>
+          <div class="adblock-ctl">
+            <button id="adblock-reload" class="text-btn" hidden>Retry</button>
+            <button id="adblock-pill" class="pill" role="switch" aria-checked="true">
+              <span class="dot"></span><span id="adblock-text">ON</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section class="group" id="appearance">
+        <h2>Appearance</h2>
+        <div class="row">
+          <div class="row-label">
+            <strong>Window opacity</strong>
+            <small>Fade the whole window. Floor is 20% so you can't lose it.</small>
+          </div>
+          <div class="opacity-ctl">
+            <input id="opacity" type="range" min="0.2" max="1" step="0.05" value="1" />
+            <span id="opacity-val" class="mono">100%</span>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="row-label">
+            <strong>Overlay mode</strong>
+            <small>Clicks pass through &amp; the window floats on top. Toggle back with <span class="kbd-for" data-cmd="stealth.toggleOverlay"></span>.</small>
+          </div>
+          <button id="overlay-pill" class="pill" role="switch" aria-checked="false">
+            <span class="dot"></span><span id="overlay-text">OFF</span>
+          </button>
+        </div>
+      </section>
+
+      <section class="group" id="profiles">
+        <h2>Profiles</h2>
+        <p class="note">
+          Each profile is a separate browser: its own sign-ins and cookies, history, bookmarks and
+          extensions. The profile button (top right) opens a tab in another profile; tabs show their
+          profile's colour. Links you open from a tab stay in its profile.
+        </p>
+        <div id="profile-list" class="profile-list"></div>
+        <form id="profile-add" class="profile-add" autocomplete="off">
+          <input id="profile-name" class="field" placeholder="New profile name, e.g. Work" spellcheck="false" maxlength="40" />
+          <button type="submit" class="text-btn accent">Add profile</button>
+        </form>
+        <p class="form-msg" id="profile-msg"></p>
+      </section>
+
+      <section class="group" id="startup">
+        <h2>On startup</h2>
+        <label class="radio-row">
+          <input type="radio" name="startup" value="restore" />
+          <span><strong>Continue where you left off</strong><small>Reopen the tabs from last time. They load when you click them, so startup stays fast.</small></span>
+        </label>
+        <label class="radio-row">
+          <input type="radio" name="startup" value="newtab" />
+          <span><strong>Open a new tab</strong><small>Start clean every time. Save tabs you want to keep as a session (Library → Sessions).</small></span>
+        </label>
+      </section>
+
+      <section class="group" id="downloads">
+        <h2>Downloads</h2>
+        <div class="row">
+          <div class="row-label">
+            <strong>Save files to</strong>
+            <small id="dl-dir" class="selectable"></small>
+          </div>
+          <div class="btn-pair">
+            <button id="dl-dir-change" class="text-btn accent">Change…</button>
+            <button id="dl-dir-reset" class="text-btn" hidden>Use Downloads</button>
+          </div>
+        </div>
+        <div class="row">
+          <div class="row-label">
+            <strong>Ask where to save each file</strong>
+            <small>Right-click → “Save … as” always asks.</small>
+          </div>
+          <button id="dl-ask" class="pill" role="switch" aria-checked="false"><span class="dot"></span><span id="dl-ask-text">OFF</span></button>
+        </div>
+        <div class="row">
+          <div class="row-label">
+            <strong>Connections per download</strong>
+            <small>Big files are fetched in parallel pieces, like a download manager. Every piece's progress is
+              saved, so downloads continue after a network drop, a pause, or restarting Bro. Lower this if a site limits connections.</small>
+          </div>
+          <div class="opacity-ctl">
+            <input id="dl-conn" type="range" min="1" max="16" step="1" value="8" />
+            <span id="dl-conn-val" class="mono">8</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="group" id="search">
+        <h2>Search engines</h2>
+        <div class="row">
+          <div class="row-label">
+            <strong>Default search engine</strong>
+            <small>Used when you type words that aren't a web address.</small>
+          </div>
+          <select id="search-default" class="select"></select>
+        </div>
+        <p class="note">
+          <strong>Keywords:</strong> type a keyword, a space, then your search in the address bar or on the
+          new-tab page, e.g. <kbd>yt lofi</kbd> or <kbd>w Electron</kbd>. In the URL, <kbd>%s</kbd> marks where
+          the search terms go.
+        </p>
+        <div class="engine-table" id="engine-table"></div>
+        <form class="engine-row engine-add" id="engine-add" autocomplete="off">
+          <input class="field kw" id="add-kw" placeholder="keyword" spellcheck="false" />
+          <input class="field nm" id="add-name" placeholder="Name" spellcheck="false" />
+          <input class="field url" id="add-url" placeholder="https://example.com/search?q=%s" spellcheck="false" />
+          <button type="submit" class="text-btn accent">Add</button>
+        </form>
+        <p class="form-msg" id="search-msg"></p>
+        <div class="row-end">
+          <button id="search-reset" class="text-btn">Restore default engines</button>
+        </div>
+      </section>
+
+      <section class="group" id="shortcuts">
+        <h2>Keyboard shortcuts</h2>
+        <p class="note">
+          Click <strong>+</strong> next to a command, then press the keys you want (include Ctrl, Alt or
+          <span class="mac-only">Cmd</span><span class="win-only">Win</span>; F-keys work alone). Esc cancels.
+          A key can only do one thing — assigning it moves it from its old command.
+          <strong>System-wide</strong> groups work even when Bro isn't focused.
+        </p>
+        <p class="form-msg" id="sc-msg"></p>
+        <div id="sc-failed" class="warn" hidden></div>
+        <div id="sc-master"></div>
+        <div id="sc-groups"></div>
+        <div class="row-end">
+          <button id="sc-reset-all" class="text-btn">Reset all shortcuts</button>
+        </div>
+      </section>
+
+      <section class="group" id="data">
+        <h2>Your data</h2>
+        <div class="row">
+          <div class="row-label">
+            <strong>Back up or move Bro</strong>
+            <small>One .json file with bookmarks, history, sessions (incl. the tabs open now), shortcuts, search engines and startup choice. Cookies and sign-ins are not included.</small>
+          </div>
+          <div class="btn-pair">
+            <button id="data-export" class="text-btn accent">Export…</button>
+            <button id="data-import" class="text-btn">Import…</button>
+          </div>
+        </div>
+        <p class="form-msg" id="data-msg"></p>
+        <div class="row">
+          <div class="row-label">
+            <strong>Clear browsing data</strong>
+            <small>Cookies sign you out of websites. Cache is just downloaded files and is safe to clear. <span id="clear-scope"></span></small>
+          </div>
+          <div class="btn-pair">
+            <button id="clear-history" class="text-btn">History</button>
+            <button id="clear-cookies" class="text-btn">Cookies</button>
+            <button id="clear-cache" class="text-btn">Cache</button>
+          </div>
+        </div>
+        <div class="row">
+          <div class="row-label">
+            <strong>Data folder</strong>
+            <small id="data-dir" class="selectable"></small>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <script src="settings.js"></script>
+  </body>
+</html>

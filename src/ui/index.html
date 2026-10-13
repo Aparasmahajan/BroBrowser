@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' crx: data:"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bro</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="chrome">
+    <!-- Row 1: tab strip (draggable) -->
+    <div id="tabstrip">
+      <div id="tabs"></div>
+      <button id="new-tab" class="icon-btn" title="New tab (Ctrl/Cmd+T)" aria-label="New tab">+</button>
+      <button id="new-private" class="icon-btn private-btn" title="New private tab (Ctrl/Cmd+Shift+N)" aria-label="New private tab"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M4 10h16l-1.6-5.2A1.2 1.2 0 0 0 17.2 4H6.8a1.2 1.2 0 0 0-1.2.8L4 10Zm-2 1.5h20v1.6H2v-1.6Zm4.5 3a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm11 0a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm-7 2.3h3v1.4h-3v-1.4Z"/></svg></button>
+      <div class="drag-fill"></div>
+      <div id="win-controls" class="win-controls">
+        <button class="win-btn" id="btn-min" title="Minimize" aria-label="Minimize">&#x2013;</button>
+        <button class="win-btn" id="btn-max" title="Maximize" aria-label="Maximize">&#x25A1;</button>
+        <button class="win-btn danger" id="btn-close" title="Close" aria-label="Close">&#x2715;</button>
+      </div>
+    </div>
+
+    <!-- Row 2: toolbar -->
+    <div id="toolbar">
+      <button class="icon-btn" id="btn-back" title="Back" aria-label="Back">&#x2190;</button>
+      <button class="icon-btn" id="btn-forward" title="Forward" aria-label="Forward">&#x2192;</button>
+      <button class="icon-btn" id="btn-reload" title="Reload (Ctrl/Cmd+R)" aria-label="Reload">&#x21bb;</button>
+      <span id="private-badge" class="private-badge" title="Private tab: no history, cookies wiped when the last private tab closes, extensions off" hidden>Private</span>
+      <div id="omnibox-wrap">
+        <input
+          id="omnibox"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="Search Google or type a URL"
+        />
+        <button id="btn-zoom" class="omnibox-zoom" title="Reset zoom" aria-label="Reset zoom" hidden>100%</button>
+        <button id="btn-bookmark" class="omnibox-btn" title="Bookmark this page (Ctrl/Cmd+D)" aria-label="Bookmark">&#x2606;</button>
+      </div>
+      <div id="findbar" class="findbar" role="search" hidden>
+        <input id="find-input" type="text" spellcheck="false" autocomplete="off" placeholder="Find in page" aria-label="Find in page" />
+        <span id="find-count" class="find-count"></span>
+        <button class="icon-btn small" id="find-prev" title="Previous (Shift+Enter)" aria-label="Previous match">&#x2191;</button>
+        <button class="icon-btn small" id="find-next" title="Next (Enter)" aria-label="Next match">&#x2193;</button>
+        <button class="icon-btn small" id="find-close" title="Close (Esc)" aria-label="Close find bar">&#x2715;</button>
+      </div>
+      <span id="shield" class="shield" title="Trackers & ads blocked this session">
+        <span class="shield-icon">&#x1F6E1;</span><span id="shield-count">0</span>
+      </span>
+      <button class="icon-btn dl-btn" id="btn-downloads" title="Downloads (Ctrl/Cmd+J)" aria-label="Downloads" hidden><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path fill="currentColor" d="M11 3h2v9.6l3.3-3.3 1.4 1.4L12 16.4l-5.7-5.7 1.4-1.4 3.3 3.3V3ZM5 18h14v2H5v-2Z"/></svg><span id="dl-badge" class="dl-badge" hidden>0</span><span id="dl-progress" class="dl-progress" hidden></span></button>
+      <browser-action-list id="actions"></browser-action-list>
+      <button class="icon-btn" id="btn-webstore" title="Get extensions (Chrome Web Store)" aria-label="Extensions">&#x1F9E9;</button>
+      <button class="icon-btn" id="btn-library" title="Bookmarks & History (Ctrl/Cmd+Y)" aria-label="Library">&#x1F4DA;</button>
+      <button class="profile-btn" id="btn-profile" title="Profiles" aria-label="Profiles">P</button>
+      <button class="icon-btn" id="btn-settings" title="Settings (Ctrl/Cmd+Shift+S)" aria-label="Settings">&#x2699;</button>
+    </div>
+
+    <script src="index.js"></script>
+  </body>
+</html>

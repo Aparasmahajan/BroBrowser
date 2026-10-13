@@ -1,0 +1,477 @@
+import { Menu, WebContentsView, session, type Session } from 'electron';
+import { join } from 'node:path';
+import type { MainWindow } from './window';
+import { CHROME_H } from './window';
+import { TabManager, type TabSessions } from './tabs';
+import { Library } from './library';
+import { AdBlock } from './adblock';
+import { Extensions } from './extensions';
+import { JsonStore } from './store';
+import { Sessions } from './sessions';
+import { SearchSettings } from './search';
+import { ShortcutManager } from './shortcuts';
+import { commandHandlers } from './commands';
+import { Profiles, DEFAULT_PROFILE } from './profiles';
+import { DownloadManager } from './downloads';
+import { showTabContextMenu, showUiContextMenu } from './context-menu';
+import { Event, type FindPayload, type LibraryView, type Prefs, type ProfilesState } from '../shared/ipc-contract';
+import type { CustomShortcut } from '../shared/shortcuts';
+
+const BRIDGE_PRELOAD = join(__dirname, '../preload/bridge.js');
+const CHROME_PRELOAD = join(__dirname, '../preload/chrome.js'); // bridge + extension toolbar
+const CHROME_HTML = join(__dirname, '../ui/index.html');
+const SETTINGS_HTML = join(__dirname, '../ui/settings.html');
+const LIBRARY_HTML = join(__dirname, '../ui/library.html');
+/** No "persist:" prefix → Chromium keeps it in memory only; nothing reaches disk. */
+const PRIVATE_PARTITION = 'bro-private';
+
+interface AppSettings {
+  adblockEnabled: boolean;
+}
+
+const DEFAULT_PREFS: Prefs = { startup: 'restore', downloadDir: '', askWhereToSave: false, downloadConnections: 8 };
+
+/**
+ * Assembles the browser window: a top chrome bar (tabs + toolbar), the tab
+ * content area below it, and two full-area overlays (Settings, Library) that
+ * slide over the tabs on demand. Only the chrome + overlay views get the
+ * privileged preload.
+ */
+export class Browser {
+  private readonly chrome: WebContentsView;
+  private readonly settings: WebContentsView;
+  private readonly libraryView: WebContentsView;
+  private readonly overlays: WebContentsView[];
+  private readonly settingsCfg: JsonStore<AppSettings>;
+  private readonly prefs: JsonStore<Prefs>;
+  private readonly libraries = new Map<string, Library>();
+  /** Sessions already given ad blocking, downloads (and extensions, per profile). */
+  private readonly wired = new Set<Session>();
+  private readonly privateSession: Session;
+
+  readonly tabs: TabManager;
+  readonly adblock: AdBlock;
+  readonly extensions: Extensions;
+  readonly sessions: Sessions;
+  readonly search: SearchSettings;
+  readonly shortcuts: ShortcutManager;
+  readonly profiles: Profiles;
+  readonly downloads: DownloadManager;
+
+  private open: WebContentsView | null = null;
+  private lastFind = '';
+  /** Set once the window starts closing, so teardown can't overwrite the autosaved session. */
+  private closing = false;
+  /** Profile last announced to the UI (Library shows its bookmarks/history). */
+  private shownProfile: string;
+
+  constructor(private mw: MainWindow) {
+    const win = mw.win;
+    // Overlay views are trusted but sandboxed (they only load our local pages).
+    const mkOverlay = () =>
+      new WebContentsView({
+        webPreferences: { preload: BRIDGE_PRELOAD, contextIsolation: true, sandbox: true, nodeIntegration: false },
+      });
+
+    // The chrome view hosts the extension toolbar, whose preload needs Node
+    // require + ipcRenderer → sandbox:false (contextIsolation stays on; it only
+    // ever loads our own index.html).
+    this.chrome = new WebContentsView({
+      webPreferences: { preload: CHROME_PRELOAD, contextIsolation: true, sandbox: false, nodeIntegration: false },
+    });
+    this.settings = mkOverlay();
+    this.libraryView = mkOverlay();
+    this.overlays = [this.settings, this.libraryView];
+
+    win.contentView.addChildView(this.chrome);
+    void this.chrome.webContents.loadFile(CHROME_HTML);
+    for (const v of this.overlays) {
+      win.contentView.addChildView(v);
+      v.setVisible(false);
+    }
+    void this.settings.webContents.loadFile(SETTINGS_HTML);
+    void this.libraryView.webContents.loadFile(LIBRARY_HTML);
+
+    // Services. Route all their events to every UI view.
+    const send = (ch: string, p: unknown) => this.send(ch, p);
+    this.settingsCfg = new JsonStore<AppSettings>('settings', { adblockEnabled: true });
+    this.prefs = new JsonStore<Prefs>('prefs', DEFAULT_PREFS);
+    this.profiles = new Profiles();
+    this.shownProfile = this.profiles.current;
+    this.adblock = new AdBlock(send, this.settingsCfg.get().adblockEnabled);
+    this.sessions = new Sessions(send);
+    this.search = new SearchSettings(send);
+    this.downloads = new DownloadManager(
+      send,
+      () => this.getPrefs(),
+      () => (win.isDestroyed() ? null : win),
+      (partition) => (partition ? session.fromPartition(partition) : session.defaultSession),
+    );
+
+    // Private tabs: one shared in-memory session. Ads are blocked and downloads
+    // tracked there too; extensions are never attached to it.
+    this.privateSession = session.fromPartition(PRIVATE_PARTITION);
+    this.wire(this.privateSession, { private: true, profileId: DEFAULT_PROFILE, partition: PRIVATE_PARTITION });
+    this.wire(session.defaultSession, { private: false, profileId: DEFAULT_PROFILE, partition: '' });
+
+    const tabSessions: TabSessions = {
+      forProfile: (id) => this.profileSession(id),
+      partition: (id) => this.profiles.partition(id),
+      validProfile: (id) => this.profiles.valid(id),
+      privateSession: this.privateSession,
+      privatePartition: PRIVATE_PARTITION,
+    };
+    this.tabs = new TabManager(
+      win,
+      () => this.tabRegion(),
+      send,
+      (profileId, url, title) => this.libraryFor(profileId).addVisit(url, title),
+      (profileId, url) => this.libraryFor(profileId).isBookmarked(url),
+      tabSessions,
+      this.profiles.current,
+    );
+    this.tabs.search = () => this.search.get();
+    this.tabs.onChanged = () => {
+      this.autosave();
+      this.syncProfile();
+    };
+
+    // Chrome-extension runtime, one per profile (also sets tabs.hooks).
+    this.extensions = new Extensions(win, this.tabs, (id) => this.profileSession(id));
+    this.extensions.ensure(DEFAULT_PROFILE);
+
+    // Right-click menus.
+    this.tabs.onContextMenu = (wc, params, ctx) =>
+      showTabContextMenu(wc, params, ctx, {
+        window: win,
+        openTab: (url, o) => this.tabs.newTab(url, o),
+        saveAs: (url, w) => this.downloads.saveAs(url, w),
+        resolve: (text) => this.tabs.resolve(text),
+        searchEngineName: () => {
+          const cfg = this.search.get();
+          return cfg.engines.find((e) => e.keyword === cfg.defaultKeyword)?.name ?? 'the web';
+        },
+        profiles: () => this.profiles.list(),
+        extensionItems: (profileId, w, p) => this.extensions.getContextMenuItems(profileId, w, p),
+      });
+    for (const v of [this.chrome, ...this.overlays]) {
+      v.webContents.on('context-menu', (_e, params) => showUiContextMenu(v.webContents, params, win));
+    }
+
+    // Keyboard shortcuts: in-app ones are matched on every view we own.
+    this.shortcuts = new ShortcutManager(send, commandHandlers(mw, this), (s) => this.runCustom(s));
+    for (const v of [this.chrome, ...this.overlays]) this.shortcuts.attach(v.webContents);
+    this.tabs.onWebContents = (wc) => this.shortcuts.attach(wc);
+
+    mw.emit = send;
+    win.on('resize', () => this.layout());
+    // Last chance to snapshot the tabs while their webContents still exist.
+    win.on('close', () => {
+      this.autosave();
+      this.closing = true;
+    });
+
+    this.chrome.webContents.once('did-finish-load', () => {
+      const last = this.sessions.getLast();
+      if (this.getPrefs().startup === 'restore' && last.tabs.length) {
+        this.tabs.restore(last.tabs, last.active);
+      } else {
+        this.tabs.newTab();
+      }
+      this.layout();
+      win.show();
+      void this.adblock.init();      // async: filter lists load in the background
+      void this.extensions.init();   // async: Web Store + restore installed extensions
+      this.downloads.init();         // continue downloads interrupted by the last exit
+    });
+  }
+
+  // --- Sessions: every one tabs use gets ad blocking + downloads ---------------
+
+  private wire(s: Session, ctx: { private: boolean; profileId: string; partition: string }): void {
+    if (this.wired.has(s)) return;
+    this.wired.add(s);
+    this.adblock.addSession(s);
+    this.downloads.attach(s, ctx);
+  }
+
+  /** A profile's session, wired on first use (extensions too). */
+  private profileSession(id: string): Session {
+    const profileId = this.profiles.valid(id);
+    const s = this.profiles.session(profileId);
+    if (!this.wired.has(s)) {
+      this.wire(s, { private: false, profileId, partition: this.profiles.partition(profileId) });
+      this.extensions?.ensure(profileId);
+    }
+    return s;
+  }
+
+  // --- Profiles ------------------------------------------------------------------
+
+  /** Bookmarks + history of the current profile. */
+  get library(): Library {
+    return this.libraryFor(this.currentProfile());
+  }
+
+  private currentProfile(): string {
+    return this.tabs ? this.tabs.currentProfile : this.profiles.current;
+  }
+
+  private libraryFor(id: string): Library {
+    const profileId = this.profiles.valid(id);
+    let lib = this.libraries.get(profileId);
+    if (!lib) {
+      // Only the profile on screen talks to the Library page.
+      lib = new Library((ch, p) => {
+        if (profileId === this.currentProfile()) this.send(ch, p);
+      }, profileId);
+      this.libraries.set(profileId, lib);
+    }
+    return lib;
+  }
+
+  profilesState(): ProfilesState {
+    return { profiles: this.profiles.list(), current: this.currentProfile() };
+  }
+
+  /** The active tab moved to another profile → Library + switcher follow it. */
+  private syncProfile(): void {
+    const current = this.currentProfile();
+    if (current === this.shownProfile) return;
+    this.shownProfile = current;
+    this.profiles.setCurrent(current);
+    this.send(Event.ProfilesChanged, this.profilesState());
+    this.send(Event.BookmarksChanged, this.library.getBookmarks());
+    this.send(Event.HistoryChanged, this.library.getHistory());
+  }
+
+  createProfile(name: string, color: string): string {
+    const p = this.profiles.create(name, color);
+    this.send(Event.ProfilesChanged, this.profilesState());
+    this.newTabInProfile(p.id);
+    return p.id;
+  }
+
+  updateProfile(id: string, patch: { name?: string; color?: string }): void {
+    this.profiles.update(id, patch);
+    this.send(Event.ProfilesChanged, this.profilesState());
+    this.send(Event.TabsChanged, this.tabs.list());
+  }
+
+  removeProfile(id: string): boolean {
+    if (id === DEFAULT_PROFILE || !this.profiles.get(id)) return false;
+    this.tabs.closeProfileTabs(id);
+    this.downloads.dropProfile(id);
+    this.libraries.get(id)?.flush();
+    this.libraries.delete(id);
+    const ok = this.profiles.remove(id);
+    this.shownProfile = '';
+    this.syncProfile();
+    this.send(Event.ProfilesChanged, this.profilesState());
+    return ok;
+  }
+
+  newTabInProfile(id: string): void {
+    this.closeOverlay();
+    this.tabs.newTab(undefined, { profileId: this.profiles.valid(id) });
+    this.focusOmnibox();
+  }
+
+  /** Native menu under the profile button: switch (= new tab in that profile), private tab, manage. */
+  showProfileMenu(): void {
+    const current = this.currentProfile();
+    const menu = Menu.buildFromTemplate([
+      ...this.profiles.list().map((p) => ({
+        label: p.name,
+        type: 'radio' as const,
+        checked: p.id === current,
+        click: () => this.newTabInProfile(p.id),
+      })),
+      { type: 'separator' },
+      { label: 'New private tab', click: () => this.shortcuts.run('tab.newPrivate') },
+      { label: 'Manage profiles…', click: () => this.openSettingsAt('profiles') },
+    ]);
+    menu.popup({ window: this.mw.win });
+  }
+
+  /** Cookies/cache actions in Settings apply to the profile on screen. */
+  currentSession(): Session {
+    return this.profileSession(this.currentProfile());
+  }
+
+  // --- Overlays ------------------------------------------------------------
+
+  toggleSettings(): void {
+    this.toggleOverlay(this.settings);
+  }
+  closeSettings(): void {
+    this.closeOverlay();
+  }
+  toggleLibrary(): void {
+    this.toggleOverlay(this.libraryView);
+  }
+  closeLibrary(): void {
+    this.closeOverlay();
+  }
+
+  /** Open Settings scrolled to a section. */
+  openSettingsAt(section: string): void {
+    if (this.open !== this.settings) this.toggleOverlay(this.settings);
+    void this.settings.webContents
+      .executeJavaScript(`document.getElementById(${JSON.stringify(section)})?.scrollIntoView()`)
+      .catch(() => {});
+  }
+
+  /** Open the Library on a given view (unlike toggle, never closes it). */
+  openLibrary(view: LibraryView): void {
+    this.libraryView.webContents.send(Event.LibraryView, view);
+    if (this.open !== this.libraryView) this.toggleOverlay(this.libraryView);
+  }
+
+  private toggleOverlay(view: WebContentsView): void {
+    if (this.open === view) {
+      this.closeOverlay();
+    } else {
+      if (this.open) this.open.setVisible(false);
+      this.open = view;
+      this.mw.win.contentView.addChildView(view); // raise to top
+      view.setBounds(this.tabRegion());
+      view.setVisible(true);
+      view.webContents.focus();
+    }
+  }
+
+  private closeOverlay(): void {
+    if (this.open) this.open.setVisible(false);
+    this.open = null;
+    this.chrome.webContents.focus();
+  }
+
+  focusOmnibox(): void {
+    this.closeOverlay();
+    this.chrome.webContents.send(Event.FocusOmnibox);
+    this.chrome.webContents.focus();
+  }
+
+  /** Bookmark (or un-bookmark) the active tab — used by Ctrl/Cmd+D. */
+  bookmarkActiveTab(): void {
+    const info = this.tabs.activeInfo();
+    if (info) this.library.toggleBookmark(info.url, info.title);
+  }
+
+  // --- Find in page ----------------------------------------------------------
+
+  showFind(): void {
+    this.closeOverlay();
+    this.chrome.webContents.send(Event.FindShow);
+    this.chrome.webContents.focus();
+  }
+
+  find(p: FindPayload): void {
+    this.lastFind = p.text;
+    this.tabs.find(p);
+  }
+
+  /** F3 / Shift+F3: repeat the last search, or open the find bar if there is none. */
+  findAgain(forward: boolean): void {
+    if (!this.lastFind) return this.showFind();
+    this.tabs.find({ text: this.lastFind, forward, newSession: false });
+  }
+
+  stopFind(): void {
+    this.tabs.stopFind();
+  }
+
+  // --- Sessions --------------------------------------------------------------
+
+  saveSession(name: string): void {
+    this.sessions.save(name, this.tabs.snapshot().tabs);
+  }
+
+  /** Ctrl/Cmd+Shift+D: snapshot all tabs under a dated name, then show the list. */
+  saveSessionNow(): void {
+    const stamp = new Date().toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+    this.saveSession(`Session ${stamp}`);
+    this.openLibrary('sessions');
+  }
+
+  openSession(id: string): void {
+    const s = this.sessions.get(id);
+    if (!s) return;
+    this.closeOverlay();
+    this.tabs.restore(s.tabs, 0);
+  }
+
+  private autosave(): void {
+    if (this.closing) return;
+    this.sessions.setLast(this.tabs.snapshot());
+  }
+
+  // --- Custom shortcuts ------------------------------------------------------
+
+  private runCustom(s: CustomShortcut): void {
+    if (s.global) {
+      // Fired from another app: bring Bro forward to show the result.
+      if (!this.mw.win.isVisible()) this.mw.win.show();
+      this.mw.win.focus();
+    }
+    this.closeOverlay();
+    if (s.newTab) this.tabs.newTab(s.target);
+    else this.tabs.navigate(s.target);
+  }
+
+  // --- Persisted settings ----------------------------------------------------
+
+  setAdblockEnabled(enabled: boolean): void {
+    this.settingsCfg.update((s) => ({ ...s, adblockEnabled: enabled }));
+    this.adblock.setEnabled(enabled);
+  }
+
+  getPrefs(): Prefs {
+    return { ...DEFAULT_PREFS, ...this.prefs.get() };
+  }
+
+  setPrefs(p: Partial<Prefs>): void {
+    const next = this.getPrefs();
+    if (p.startup === 'restore' || p.startup === 'newtab') next.startup = p.startup;
+    if (typeof p.downloadDir === 'string') next.downloadDir = p.downloadDir;
+    if (typeof p.askWhereToSave === 'boolean') next.askWhereToSave = p.askWhereToSave;
+    if (typeof p.downloadConnections === 'number' && Number.isFinite(p.downloadConnections)) {
+      next.downloadConnections = Math.min(16, Math.max(1, Math.round(p.downloadConnections)));
+    }
+    this.prefs.set(next);
+    this.send(Event.PrefsChanged, next);
+  }
+
+  // --- Layout --------------------------------------------------------------
+
+  private tabRegion() {
+    const [w, h] = this.mw.win.getContentSize();
+    return { x: 0, y: CHROME_H, width: w, height: Math.max(0, h - CHROME_H) };
+  }
+
+  private layout(): void {
+    const [w] = this.mw.win.getContentSize();
+    this.chrome.setBounds({ x: 0, y: 0, width: w, height: CHROME_H });
+    this.tabs.layout();
+    if (this.open) this.open.setBounds(this.tabRegion());
+  }
+
+  private send(channel: string, payload: unknown): void {
+    for (const v of [this.chrome, ...this.overlays]) {
+      if (!v.webContents.isDestroyed()) v.webContents.send(channel, payload);
+    }
+  }
+
+  /** Persist pending writes and release global hotkeys (window closed / app quitting). */
+  flush(): void {
+    this.settingsCfg.flush();
+    this.prefs.flush();
+    for (const lib of this.libraries.values()) lib.flush();
+    this.sessions.flush();
+    this.search.flush();
+    this.profiles.flush();
+    this.downloads.flush();
+    this.shortcuts.dispose();
+  }
+}

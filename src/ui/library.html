@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Library</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="settings">
+    <div class="settings-sheet wide">
+      <header class="settings-head">
+        <div class="lib-tabs">
+          <button id="tab-bookmarks" class="lib-tab active">Bookmarks</button>
+          <button id="tab-history" class="lib-tab">History</button>
+          <button id="tab-sessions" class="lib-tab">Sessions</button>
+          <button id="tab-downloads" class="lib-tab">Downloads</button>
+        </div>
+        <div class="lib-head-actions">
+          <input id="filter" class="lib-filter" type="text" placeholder="Filter…" spellcheck="false" autocomplete="off" />
+          <button id="clear-history" class="text-btn" hidden>Clear history</button>
+          <button id="clear-downloads" class="text-btn" hidden>Clear finished</button>
+          <button id="close" class="icon-btn" title="Close (Esc)" aria-label="Close">&#x2715;</button>
+        </div>
+      </header>
+
+      <form id="save-session" class="lib-save" autocomplete="off" hidden>
+        <input id="session-name" class="lib-filter grow" type="text" spellcheck="false" placeholder="Name for the tabs open now…" />
+        <button type="submit" class="text-btn accent">Save open tabs</button>
+      </form>
+
+      <div id="list" class="lib-list"></div>
+      <p id="empty" class="lib-empty" hidden>Nothing here yet.</p>
+      <p id="profile-note" class="lib-profile-note" hidden></p>
+    </div>
+
+    <script src="library.js"></script>
+  </body>
+</html>

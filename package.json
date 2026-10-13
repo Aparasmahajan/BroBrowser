@@ -1,0 +1,33 @@
+{
+  "name": "bro-browser",
+  "version": "0.0.1",
+  "description": "Bro — a fast, privacy browser that is invisible to screen share and supports window opacity. Cross-platform (Windows + macOS).",
+  "main": "dist/main/index.js",
+  "author": "Mahajan",
+  "license": "MIT",
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "start": "npm run build && electron .",
+    "dev": "npm run build && electron . --enable-logging",
+    "typecheck": "tsc --noEmit",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:mac": "npm run build && electron-builder --mac"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.0",
+    "electron": "^44.7.0",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "@ghostery/adblocker-electron": "^2.20.1",
+    "electron-chrome-context-menu": "1.1.0",
+    "electron-chrome-extensions": "^4.9.0",
+    "electron-chrome-web-store": "^0.13.0",
+    "electron-updater": "^6.8.9"
+  }
+}
