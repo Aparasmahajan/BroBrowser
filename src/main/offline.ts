@@ -532,7 +532,7 @@ export class OfflineManager {
       return 'ok';
     }
     r.error = res.error;
-    if (res.outcome === 'drm' || res.outcome === 'network' || res.outcome === 'stopped' || res.outcome === 'live') return res.outcome;
+    if ( res.outcome === 'network' || res.outcome === 'stopped' || res.outcome === 'live') return res.outcome;
     return 'error';
   }
 
