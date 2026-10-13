@@ -1,7 +1,7 @@
 // Browser chrome: renders the tab strip + toolbar and drives navigation via the
 // typed `window.bro` bridge. The screen-share control is NOT here — it lives on
 // the Settings page (gear button / Ctrl/Cmd+Shift+S).
-import { type DownloadInfo, type ProfilesState, type SearchConfig, type TabState } from '../shared/ipc-contract';
+import { type DownloadInfo, type OfflineItem, type ProfilesState, type SearchConfig, type TabState } from '../shared/ipc-contract';
 
 const bro = window.bro;
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -31,6 +31,7 @@ $('btn-webstore').addEventListener('click', () => bro.newTab('https://chromewebs
 $('btn-zoom').addEventListener('click', () => bro.runCommand('page.zoomReset'));
 $('btn-profile').addEventListener('click', () => bro.showProfileMenu());
 $('btn-downloads').addEventListener('click', () => bro.runCommand('app.downloads'));
+$('btn-offline').addEventListener('click', () => bro.showOfflineMenu());
 
 const bookmarkBtn = $<HTMLButtonElement>('btn-bookmark');
 bookmarkBtn.addEventListener('click', () => {
@@ -201,6 +202,13 @@ function render(tabs: TabState[]): void {
     zoomBtn.hidden = zoom === 100;
     omnibox.classList.toggle('zoomed', zoom !== 100); // room for the badge
     zoomBtn.textContent = `${zoom}%`;
+    // "Save for offline" lights up when the page has played a video.
+    const offline = $<HTMLButtonElement>('btn-offline');
+    offline.disabled = !/^https?:/i.test(activeTab.url);
+    offline.classList.toggle('has-video', activeTab.hasVideo);
+    offline.title = activeTab.hasVideo
+      ? 'Video found — save this page and its video for offline (Ctrl/Cmd+S)'
+      : 'Save for offline: this page and its video (Ctrl/Cmd+S)';
   }
 }
 
@@ -244,6 +252,29 @@ function renderDownloads(list: DownloadInfo[]): void {
   btn.dataset.ready = '1';
 }
 bro.onDownloadsChanged(renderDownloads);
+
+// --- Save for offline button: badge + progress while saves run ---------------
+let knownOffline = new Set<string>();
+function renderOffline(list: OfflineItem[]): void {
+  const btn = $('btn-offline');
+  const active = list.filter((o) => o.status === 'working' || o.status === 'queued');
+  const badge = $('off-badge');
+  badge.hidden = active.length === 0;
+  badge.textContent = String(active.length);
+  const cur = list.find((o) => o.status === 'working');
+  const bar = $('off-progress');
+  bar.hidden = !cur || cur.total <= 0;
+  bar.style.width = cur && cur.total > 0 ? `${Math.min(100, (cur.received / cur.total) * 100)}%` : '0';
+  if (list.some((o) => !knownOffline.has(o.id)) && btn.dataset.ready) {
+    btn.classList.remove('pulse');
+    void btn.offsetWidth;
+    btn.classList.add('pulse');
+  }
+  knownOffline = new Set(list.map((o) => o.id));
+  btn.dataset.ready = '1';
+}
+bro.onOfflineChanged(renderOffline);
+void bro.getOffline().then(renderOffline);
 void bro.getDownloads().then(renderDownloads);
 void bro.listTabs().then(render);
 

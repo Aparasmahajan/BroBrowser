@@ -59,6 +59,7 @@ export function commandHandlers(mw: MainWindow, browser: Browser): Record<Comman
     'page.print': () => tabs().activeWebContents?.print(),
     'page.viewSource': () => tabs().viewSource(),
     'page.devtools': () => tabs().activeWebContents?.toggleDevTools(),
+    'page.saveOffline': () => browser.saveOffline('page+video'),
 
     'app.bookmark': () => browser.bookmarkActiveTab(),
     'app.library': () => browser.toggleLibrary(),
