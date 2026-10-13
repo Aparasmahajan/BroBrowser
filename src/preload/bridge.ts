@@ -138,4 +138,8 @@ const api: BroApi = {
   platform: process.platform,
 };
 
-contextBridge.exposeInMainWorld('bro', api);
+// Only Bro's own pages (dist/ui/*.html, also inside app.asar) get the bridge — defence in
+// depth for Library tabs, which live in the tab area next to web pages.
+if (location.protocol === 'file:' && /\/dist\/ui\/[\w-]+\.html$/.test(location.pathname)) {
+  contextBridge.exposeInMainWorld('bro', api);
+}

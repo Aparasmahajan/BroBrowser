@@ -53,12 +53,29 @@ interface Tab {
   private: boolean;
   /** Restored but not loaded yet — loads on first activation (keeps startup fast). */
   sleeping?: SessionTab;
+  /**
+   * Shows Bro's own Library page with the privileged bridge. It only ever shows that
+   * page: going anywhere else swaps in a normal tab, and extensions never see it.
+   */
+  internal: boolean;
 }
 
 /** A closed tab, remembered for Ctrl/Cmd+Shift+T. */
 type ClosedTab = SessionTab & { private: boolean; profileId: string };
 
 const isStartUrl = (url: string) => url.startsWith('file://') && url.includes('start.html');
+
+/** Bro's Library (Downloads, Offline, History…) as a page in a tab, like chrome://downloads. */
+const LIBRARY_URL = pathToFileURL(join(__dirname, '../ui/library.html')).href;
+const LIBRARY_VIEWS = ['downloads', 'offline', 'history', 'bookmarks', 'sessions'];
+const isLibraryUrl = (url: string) => url.startsWith(LIBRARY_URL);
+export const libraryAddress = (view: string) => `bro://${view}`;
+/** What the address bar shows: bro://offline instead of a long file:// path. */
+function displayUrl(url: string): string {
+  if (!isLibraryUrl(url)) return url;
+  const view = url.split('#')[1] ?? '';
+  return libraryAddress(LIBRARY_VIEWS.includes(view) ? view : 'downloads');
+}
 
 /**
  * Turn whatever the user typed into a navigable URL. "yt lofi" (or "!yt lofi")
@@ -67,6 +84,8 @@ const isStartUrl = (url: string) => url.startsWith('file://') && url.includes('s
 export function resolveInput(raw: string, search: SearchConfig = DEFAULT_SEARCH): string {
   const input = raw.trim();
   if (!input) return START_URL;
+  const page = /^bro:\/\/([a-z]+)\/?$/i.exec(input);
+  if (page && LIBRARY_VIEWS.includes(page[1].toLowerCase())) return `${LIBRARY_URL}?tab=1#${page[1].toLowerCase()}`;
   if (/^(https?|file|about|view-source|chrome):/i.test(input)) return input;
 
   const fill = (tpl: string, q: string) => tpl.replace(/%s/g, encodeURIComponent(q));
@@ -114,6 +133,8 @@ export class TabManager {
   onChanged: () => void = () => {};
   /** Has a video been seen on this tab's page? Set by Browser. */
   hasVideo: (wc: WebContents) => boolean = () => false;
+  /** Preload with the `window.bro` bridge, for Library tabs. Set by Browser. */
+  bridgePreload = '';
 
   constructor(
     private win: BrowserWindow,
@@ -178,20 +199,23 @@ export class TabManager {
   ): number {
     const isPrivate = !!opts.private;
     const profileId = this.sessions.validProfile(opts.profileId ?? opts.sleeping?.profileId ?? this.currentProfile);
+    const internal = isLibraryUrl(this.resolve(opts.sleeping?.url ?? url ?? ''));
     const view = new WebContentsView({
-      webPreferences: {
-        contextIsolation: true,
-        sandbox: true,
-        nodeIntegration: false,
-        // Run session preloads (YouTube shield, ad blocker) in iframes too, e.g.
-        // YouTube players embedded in other sites. Tabs stay sandboxed, so this
-        // gives frames no Node access.
-        nodeIntegrationInSubFrames: true,
-        session: isPrivate ? this.sessions.privateSession : this.sessions.forProfile(profileId),
-      },
+      webPreferences: internal
+        ? { preload: this.bridgePreload, contextIsolation: true, sandbox: true, nodeIntegration: false }
+        : {
+            contextIsolation: true,
+            sandbox: true,
+            nodeIntegration: false,
+            // Run session preloads (YouTube shield, ad blocker) in iframes too, e.g.
+            // YouTube players embedded in other sites. Tabs stay sandboxed, so this
+            // gives frames no Node access.
+            nodeIntegrationInSubFrames: true,
+            session: isPrivate ? this.sessions.privateSession : this.sessions.forProfile(profileId),
+          },
     });
     const id = this.nextId++;
-    const tab: Tab = { id, view, profileId, private: isPrivate, sleeping: opts.sleeping, favicon: opts.sleeping?.favicon };
+    const tab: Tab = { id, view, profileId, private: isPrivate && !internal, sleeping: opts.sleeping, favicon: opts.sleeping?.favicon, internal };
     this.tabs.push(tab);
     this.win.contentView.addChildView(view);
 
@@ -278,9 +302,39 @@ export class TabManager {
     void s.clearAuthCache().catch(() => {});
   }
 
-  /** Extensions never see private tabs (Chrome's default for Incognito). */
+  /** Extensions never see private tabs (Chrome's default for Incognito) or Bro's own Library tabs. */
   private hook(tab: Tab, fn?: (wc: WebContents, profileId: string) => void): void {
-    if (!tab.private) fn?.(tab.view.webContents, tab.profileId);
+    if (!tab.private && !tab.internal) fn?.(tab.view.webContents, tab.profileId);
+  }
+
+  /** Open a Library page (bro://downloads, bro://offline…) — reusing the one already open, like Chrome. */
+  openLibrary(view: string): void {
+    const existing = this.tabs.find((t) => t.internal);
+    if (!existing) {
+      this.newTab(libraryAddress(view));
+      return;
+    }
+    this.activate(existing.id);
+    existing.view.webContents.send(Event.LibraryView, view);
+  }
+
+  /** Library tabs (they get the same live updates as the Library overlay). */
+  internalWebContents(): WebContents[] {
+    return this.tabs.filter((t) => t.internal && !t.sleeping && !t.view.webContents.isDestroyed()).map((t) => t.view.webContents);
+  }
+
+  /**
+   * A Library tab asked to show a web page (or a web tab asked for bro://…): those need
+   * different kinds of view, so a fresh tab takes this one's place.
+   */
+  private replaceTab(tab: Tab, input: string): void {
+    const at = this.tabs.indexOf(tab);
+    const id = this.newTab(input, { private: tab.private, profileId: tab.profileId });
+    const fresh = this.tabs.find((t) => t.id === id)!;
+    this.closeTab(tab.id);
+    this.tabs.splice(this.tabs.indexOf(fresh), 1);
+    this.tabs.splice(Math.min(at, this.tabs.length), 0, fresh);
+    this.emitChanged();
   }
 
   /** Resolve omnibox input; empty input is the start page (with the private notice if needed). */
@@ -297,7 +351,7 @@ export class TabManager {
     if (tab.sleeping) {
       const { url } = tab.sleeping;
       tab.sleeping = undefined;
-      void tab.view.webContents.loadURL(url);
+      void tab.view.webContents.loadURL(this.urlFor(tab, url));
     }
     this.hook(tab, this.hooks.onActivated);
     this.layout();
@@ -320,7 +374,10 @@ export class TabManager {
 
   navigate(input: string, id?: number): void {
     const tab = this.tabs.find((t) => t.id === (id ?? this.activeId));
-    if (tab) void tab.view.webContents.loadURL(this.urlFor(tab, input));
+    if (!tab) return;
+    const url = this.urlFor(tab, input);
+    if (tab.internal !== isLibraryUrl(url)) return this.replaceTab(tab, input);
+    void tab.view.webContents.loadURL(url);
   }
 
   back(id?: number): void {
@@ -426,7 +483,8 @@ export class TabManager {
     if (!wc || wc.isDestroyed()) return null;
     const url = wc.getURL();
     if (!url || isStartUrl(url)) return null;
-    return { url, title: wc.getTitle(), favicon: tab.favicon, profileId: tab.profileId };
+    // Library tabs are saved as bro://… so they survive Bro moving folders (dev build → installed).
+    return { url: displayUrl(url), title: wc.getTitle(), favicon: tab.favicon, profileId: tab.profileId };
   }
 
   private wire(tab: Tab): void {
@@ -441,7 +499,7 @@ export class TabManager {
 
     // Private tabs leave no history.
     const visit = (title: string) => {
-      if (!tab.private) this.onVisit(tab.profileId, wc.getURL(), title);
+      if (!tab.private && !tab.internal) this.onVisit(tab.profileId, wc.getURL(), title);
     };
     const recordVisit = () => visit(wc.getTitle());
 
@@ -477,6 +535,11 @@ export class TabManager {
     // start.html?q=… and we resolve that here, so keywords + the default
     // engine apply there too.
     wc.on('will-navigate', (e, url) => {
+      // A Library tab never shows anything but the Library (it carries the privileged bridge).
+      if (tab.internal && !isLibraryUrl(url)) {
+        e.preventDefault();
+        return this.replaceTab(tab, url);
+      }
       if (!isStartUrl(url)) return;
       const q = new URL(url).searchParams.get('q');
       if (q == null) return;
@@ -504,7 +567,7 @@ export class TabManager {
       return {
         id: tab.id,
         title: s.title || s.url || 'New Tab',
-        url: s.url,
+        url: displayUrl(s.url),
         active,
         loading: false,
         canGoBack: false,
@@ -524,12 +587,12 @@ export class TabManager {
     return {
       id: tab.id,
       title: isStart ? 'New Tab' : wc.getTitle() || 'Loading…',
-      url: isStart ? '' : url,
+      url: isStart ? '' : displayUrl(url),
       active,
       loading: wc.isLoading(),
       canGoBack: wc.navigationHistory.canGoBack(),
       canGoForward: wc.navigationHistory.canGoForward(),
-      bookmarked: !isStart && !tab.private && this.isBookmarked(tab.profileId, url),
+      bookmarked: !isStart && !tab.private && this.isBookmarked(tab.profileId, displayUrl(url)),
       favicon: tab.favicon,
       zoom: wc.getZoomFactor(),
       sleeping: false,

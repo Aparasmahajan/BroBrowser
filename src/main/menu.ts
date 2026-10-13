@@ -60,6 +60,8 @@ export function buildMenu(browser: Browser): void {
         item('app.bookmark', 'Bookmark This Page'),
         item('app.library', 'Bookmarks & History'),
         item('app.history', 'History'),
+        item('app.downloads', 'Downloads'),
+        item('app.offline', 'Offline Videos'),
       ],
     },
     {

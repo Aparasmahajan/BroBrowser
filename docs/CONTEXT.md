@@ -58,6 +58,13 @@ is supported by the code but not built here.
   CDN links let it through), DASH through yt-dlp. yt-dlp gets the tab's cookies (temp Netscape
   file, deleted after) + UA + Referer, and is retried with `--impersonate chrome` when refused.
   One save runs at a time (slow links do better that way).
+- Library tabs (`bro://downloads|offline|history|bookmarks|sessions` → `library.html?tab=1#view`):
+  `TabManager` gives them the bridge preload and marks them `internal`; navigating anywhere else
+  replaces the tab (`replaceTab`), `hook()` hides them from extensions, sessions store them as
+  `bro://…`. `Browser.send` also feeds them live updates.
+- A single save whose page yt-dlp reads as a playlist (Udemy lecture → course) is stopped at the
+  `after_filter` print, then `--flat-playlist` finds the entry whose id is in the page URL. Don't
+  use `--match-filters` for that: it opens every entry first (534 Udemy API calls).
 - Never hand yt-dlp a stream URL without `--use-extractors generic`: site extractors match by
   host, e.g. `udemy.com/assets/….m3u8` was treated as a Udemy course → 403.
 - Browser-path HLS: picks the variant for the quality setting (+ its EXT-X-MEDIA audio), mirrors

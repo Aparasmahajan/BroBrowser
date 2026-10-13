@@ -48,10 +48,21 @@ clearDownloadsBtn.addEventListener('click', () => bro.clearDownloads());
 const clearOfflineBtn = $<HTMLButtonElement>('clear-offline');
 clearOfflineBtn.addEventListener('click', () => bro.clearOffline());
 
+/** Opened as a page in a tab (bro://downloads, bro://offline) rather than over the page. */
+const inTab = new URLSearchParams(location.search).has('tab');
+const VIEW_TITLES: Record<LibraryView, string> = {
+  bookmarks: 'Bookmarks',
+  history: 'History',
+  sessions: 'Sessions',
+  downloads: 'Downloads',
+  offline: 'Offline videos',
+};
+
 // --- Header controls -------------------------------------------------------
+$('close').hidden = inTab; // a tab is closed like any tab
 $('close').addEventListener('click', () => bro.closeLibrary());
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') bro.closeLibrary();
+  if (e.key === 'Escape' && !inTab) bro.closeLibrary();
 });
 
 for (const [v, el] of Object.entries(viewTabs) as [LibraryView, HTMLElement][]) {
@@ -77,11 +88,20 @@ function setView(v: LibraryView): void {
   clearDownloadsBtn.hidden = v !== 'downloads';
   clearOfflineBtn.hidden = v !== 'offline';
   saveForm.hidden = v !== 'sessions';
+  if (inTab) {
+    // The address bar shows bro://<view>, and the tab is named after it.
+    window.history.replaceState(null, '', `#${v}`);
+    document.title = VIEW_TITLES[v];
+  }
   render();
 }
 
 // Opened on a specific view (Ctrl/Cmd+H → History, Ctrl/Cmd+Shift+D → Sessions).
 bro.onLibraryView(setView);
+if (inTab) {
+  const start = location.hash.slice(1) as LibraryView;
+  setView(start in VIEW_TITLES ? start : 'downloads');
+}
 
 // --- Rendering -------------------------------------------------------------
 function timeAgo(ts: number): string {

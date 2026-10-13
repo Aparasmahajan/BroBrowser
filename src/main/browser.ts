@@ -162,6 +162,7 @@ export class Browser {
       this.profiles.current,
     );
     this.tabs.search = () => this.search.get();
+    this.tabs.bridgePreload = BRIDGE_PRELOAD; // Library tabs (bro://downloads, bro://offline)
     this.tabs.onChanged = () => {
       this.autosave();
       this.syncProfile();
@@ -363,6 +364,12 @@ export class Browser {
   }
 
   /** Open the Library on a given view (unlike toggle, never closes it). */
+  /** Open a Library view as a page in a tab (Ctrl/Cmd+J → bro://downloads), like Chrome. */
+  openLibraryTab(view: LibraryView): void {
+    this.closeOverlay();
+    this.tabs.openLibrary(view);
+  }
+
   openLibrary(view: LibraryView): void {
     this.libraryView.webContents.send(Event.LibraryView, view);
     if (this.open !== this.libraryView) this.toggleOverlay(this.libraryView);
@@ -435,7 +442,7 @@ export class Browser {
       },
       { label: 'Save English subtitles', type: 'checkbox', checked: prefs.videoSubtitles, click: () => this.setPrefs({ videoSubtitles: !prefs.videoSubtitles }) },
       { type: 'separator' },
-      { label: 'Offline library…', click: () => this.openLibrary('offline') },
+      { label: 'Offline library (Ctrl+Shift+J)', click: () => this.openLibraryTab('offline') },
       ...(!tools.ready && !tools.installing
         ? [{ label: 'The first video save fetches the video tools (~50 MB, once)', enabled: false }]
         : []),
@@ -547,6 +554,8 @@ export class Browser {
     for (const v of [this.chrome, ...this.overlays]) {
       if (!v.webContents.isDestroyed()) v.webContents.send(channel, payload);
     }
+    // Library tabs (bro://downloads, bro://offline…) get the same live updates.
+    for (const wc of this.tabs?.internalWebContents() ?? []) wc.send(channel, payload);
   }
 
   /** Persist pending writes and release global hotkeys (window closed / app quitting). */

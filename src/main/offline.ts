@@ -28,6 +28,10 @@ const MP4_AUDIO = ['aac', 'mp3', 'opus', 'flac'];
 const QUALITY = [360, 480, 720, 1080, 0, -1];
 /** yt-dlp's catch-alls for sites it doesn't know: their titles are just "<page title> (1)". */
 const GENERIC_EXTRACTORS = ['Generic', 'HTML5MediaEmbed'];
+/** A plain page embedding more videos than this is a listing, not "the video on this page". */
+const MAX_PAGE_VIDEOS = 20;
+/** yt-dlp silent this long (no progress, no messages) is treated as stuck. */
+const STALL_YTDLP_MS = 4 * 60_000;
 /** yt-dlp's per-format pieces before joining: "name.f137.mp4", "name.fhls-720p.mp4". */
 const FORMAT_PIECE = /\.f(\d[\w-]*|(hls|dash|http)-[\w.=-]+)\.\w+$/;
 
@@ -65,7 +69,8 @@ const PUBLIC_KEYS: (keyof OfflineItem)[] = [
   'videos', 'error', 'started', 'finished', 'private', 'profileId',
 ];
 
-type Outcome = 'ok' | 'none' | 'drm' | 'network' | 'live' | 'stopped' | 'error';
+/** 'many': a single save turned out to be a whole course/playlist and was stopped. */
+type Outcome = 'ok' | 'none' | 'drm' | 'network' | 'live' | 'stopped' | 'error' | 'many';
 
 /** The save running now: its process (yt-dlp/ffmpeg) and in-flight browser requests, for Pause/Cancel. */
 interface Job {
@@ -434,8 +439,60 @@ export class OfflineManager {
       out = await this.ytdlp(r, url, isPage, cookies);
     }
     // Bot walls (Cloudflare & co.) often let a request through that looks like Chrome down to its TLS handshake.
-    if (out === 'error' && BLOCKED.test(r.error ?? '')) out = await this.ytdlp(r, url, isPage, cookies, true);
+    let impersonate = false;
+    if (out === 'error' && BLOCKED.test(r.error ?? '')) out = await this.ytdlp(r, url, isPage, cookies, (impersonate = true));
+    // "Save this video" on a page yt-dlp sees as a whole course/playlist (a Udemy lecture opens
+    // as its course): take only the entry this page is about, else the stream the page plays.
+    if (out === 'many') {
+      // List the entries without opening each one (one request even for a 534-lecture course),
+      // then download only the entry whose id is in the page address.
+      r.stage = 'This page belongs to a course — finding just this lesson…';
+      this.changed(true);
+      const entry = await this.findEntry(r, url, cookies, impersonate);
+      out = entry ? await this.ytdlp(r, entry, true, cookies, impersonate, true) : 'none';
+      if (out !== 'ok' && out !== 'stopped' && out !== 'network' && out !== 'drm') {
+        out = 'none';
+        r.error = undefined;
+      }
+    }
     return out;
+  }
+
+  /** The playlist entry whose id appears in the page address (udemy …/lecture/45349019 → that lecture). */
+  private findEntry(r: Rec, url: string, cookies: string | null, impersonate: boolean): Promise<string | null> {
+    const ids = idTokens(r.pageUrl);
+    if (!ids.length) return Promise.resolve(null);
+    const args = ['--flat-playlist', '--no-warnings', '--print', 'BROENTRY %(id)s %(url,webpage_url)s'];
+    if (cookies) args.push('--cookies', cookies);
+    if (r.userAgent) args.push('--user-agent', r.userAgent);
+    if (r.systemCerts) args.push('--compat-options', 'no-certifi');
+    if (impersonate) args.push('--impersonate', 'chrome');
+    args.push('--', url);
+    return new Promise((resolve) => {
+      const p = this.tools.ytdlpProcess(args);
+      if (this.running) this.running.proc = p;
+      let found: string | null = null;
+      let buf = '';
+      p.stdout?.on('data', (chunk: Buffer) => {
+        buf += chunk.toString('utf8');
+        const lines = buf.split(/\r?\n/);
+        buf = lines.pop() ?? '';
+        for (const l of lines) {
+          const m = /^BROENTRY (\S+) (\S+)/.exec(l.trim());
+          if (m && !found && ids.includes(m[1]) && /^https?:/i.test(m[2])) {
+            found = m[2];
+            killTree(p); // got it — no need to list the rest
+          }
+        }
+      });
+      // Listing a course is one quick request; don't let a stuck one hold up the queue.
+      const timer = setTimeout(() => killTree(p), 120_000);
+      p.on('error', () => resolve(null));
+      p.on('close', () => {
+        clearTimeout(timer);
+        resolve(found);
+      });
+    });
   }
 
   /** Fetch a stream the page played through the tab's own session (cookies, user agent). */
@@ -481,7 +538,8 @@ export class OfflineManager {
     return 'error';
   }
 
-  private ytdlp(r: Rec, url: string, isPage: boolean, cookies: string | null, impersonate = false): Promise<Outcome> {
+  /** `entry`: url is one entry picked out of a course/playlist (never treat it as the whole list). */
+  private async ytdlp(r: Rec, url: string, isPage: boolean, cookies: string | null, impersonate = false, entry = false): Promise<Outcome> {
     const audioOnly = r.quality === -1;
     const name = r.what === 'playlist'
       ? '%(playlist_index|0)03d - %(title).120B [%(id)s].%(ext)s'
@@ -489,6 +547,8 @@ export class OfflineManager {
     const args = [
       '--newline', '--progress', '--no-mtime', '--ignore-errors',
       '--progress-template', 'download:BROPROG %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s %(progress.speed)s %(progress.eta)s',
+      // BROSEEN comes before anything of the video is written — early enough to stop a whole course.
+      '--print', 'after_filter:BROSEEN %(n_entries|0)s %(extractor_key)s',
       '--print', 'before_dl:BROINFO %(playlist_index|0)s %(n_entries|0)s %(extractor_key)s\t%(playlist_title|)s\t%(title)s',
       '--print', 'after_move:BRODONE %(filepath)s',
       '--retries', '20', '--fragment-retries', '20',
@@ -497,6 +557,8 @@ export class OfflineManager {
       r.what === 'playlist' ? '--yes-playlist' : '--no-playlist',
       '--write-thumbnail', '--convert-thumbnails', 'jpg',
       '--write-description',
+      // Only the videos' own thumbnails/descriptions, not the playlist's (they belong to no video).
+      '--no-write-playlist-metafiles',
     ];
     if (audioOnly) args.push('-f', 'ba[ext=m4a]/ba/b', '-x', '--audio-format', 'm4a');
     else args.push('-S', r.quality > 0 ? `res:${r.quality},vcodec:h264,acodec:aac` : 'vcodec:h264,acodec:aac', '--merge-output-format', 'mp4');
@@ -511,8 +573,12 @@ export class OfflineManager {
     if (!isPage) args.push('--use-extractors', 'generic');
     args.push('--', url);
 
-    r.stage = isPage ? 'Looking for the video…' : 'Downloading the stream the page played…';
+    r.stage = entry ? 'Downloading just this lesson…' : isPage ? 'Looking for the video…' : 'Downloading the stream the page played…';
     this.changed(true);
+    // What was in the folder before, so a run stopped for being a whole course leaves nothing behind.
+    const before = new Set(await readdir(r.folder).catch(() => [] as string[]));
+    // One "Save video" may still fetch several videos from a page that embeds a few (generic pages).
+    const single = isPage && !entry && r.what !== 'playlist';
 
     return new Promise((resolve) => {
       const job = this.running;
@@ -521,8 +587,30 @@ export class OfflineManager {
       const errors: string[] = [];
       let saved = 0;
       let buf = '';
+      let tooMany = false;
+      // Watchdog: a run that shows no sign of life for this long is stuck (a site answering
+      // very slowly, an endless listing) — stop it so the next way in, and the queue, can go on.
+      let lastSign = Date.now();
+      let stalled = false;
+      const watchdog = setInterval(() => {
+        if (Date.now() - lastSign < STALL_YTDLP_MS) return;
+        stalled = true;
+        clearInterval(watchdog);
+        killTree(p);
+      }, 10_000);
+      p.stdout?.on('data', () => (lastSign = Date.now()));
+      p.stderr?.on('data', () => (lastSign = Date.now()));
       const onLine = (line: string) => {
-        if (line.startsWith('BROPROG ')) {
+        if (line.startsWith('BROSEEN ')) {
+          const [n, extractor] = line.slice(8).split(' ');
+          const count = Number(n) || 0;
+          if (single && count > 1 && (!GENERIC_EXTRACTORS.includes(extractor) || count > MAX_PAGE_VIDEOS)) {
+            tooMany = true;
+            killTree(p);
+          }
+        } else if (tooMany) {
+          // Stopping: ignore the rest.
+        } else if (line.startsWith('BROPROG ')) {
           const [d, t, te, s, e] = line.slice(8).split(' ').map(Number);
           r.received = d || 0;
           r.total = t || te || -1;
@@ -534,7 +622,7 @@ export class OfflineManager {
           const i = Number(m?.[1]) || 0;
           const n = Number(m?.[2]) || 0;
           const t = m?.[5] ?? '';
-          r.stage = n > 1 ? `Video ${i} of ${n}: ${t}` : `Downloading: ${t}`;
+          r.stage = n > 1 && r.what === 'playlist' ? `Video ${i} of ${n}: ${t}` : `Downloading: ${t}`;
           // A site yt-dlp knows names things better than the tab did (YouTube's title
           // still says just "YouTube" while the page loads).
           if (isPage && m && !GENERIC_EXTRACTORS.includes(m[3])) {
@@ -570,17 +658,31 @@ export class OfflineManager {
       });
       p.on('error', (e) => errors.push(errText(e)));
       p.on('close', () => {
+        clearInterval(watchdog);
         if (buf) onLine(buf.trim());
         r.speed = 0;
         if (job?.stopped) return resolve('stopped');
+        // Nothing saved and nothing to resume: leave the folder as this run found it.
+        const tidy = async (out: Outcome) => {
+          for (const n of await readdir(r.folder).catch(() => [] as string[])) {
+            if (!before.has(n)) await rm(join(r.folder, n), { recursive: true, force: true }).catch(() => {});
+          }
+          resolve(out);
+        };
+        if (tooMany) return void tidy('many');
+        if (stalled && saved === 0) {
+          r.error = 'The site took too long to answer.';
+          return void tidy('error');
+        }
         const all = errors.join('\n');
         // Subtitle hiccups are only warnings; a video that arrived is a success.
         if (saved > 0) return resolve('ok');
         r.error = errors.at(-1);
-        if (/DRM/i.test(all)) return resolve('drm');
+        // Partial files stay for the retry after a network drop.
         if (looksOffline(all)) return resolve('network');
-        if (/Unsupported URL|No video formats|Unable to extract|no suitable|no video|Requested format is not available/i.test(all) || !all) return resolve('none');
-        resolve('error');
+        if (/DRM/i.test(all)) return void tidy('drm');
+        if (/Unsupported URL|No video formats|Unable to extract|no suitable|no video|Requested format is not available/i.test(all) || !all) return void tidy('none');
+        void tidy('error');
       });
     });
   }
@@ -992,6 +1094,19 @@ function baseDomain(host: string): string {
   if (parts.length <= 2) return host;
   const n = parts.at(-1)!.length === 2 && parts.at(-2)!.length <= 3 ? 3 : 2;
   return parts.slice(-n).join('.');
+}
+
+/**
+ * Pieces of the page address that could be a video id —
+ * udemy.com/course/x/learn/lecture/45349009 → [course, x, learn, lecture, 45349009].
+ */
+function idTokens(pageUrl: string): string[] {
+  try {
+    const u = new URL(pageUrl);
+    return [...new Set([...u.pathname.split('/'), ...u.searchParams.values()].filter((t) => /^[\w-]{4,}$/.test(t)))];
+  } catch {
+    return [];
+  }
 }
 
 /** The most useful thing to tell the user when nothing could be saved. */

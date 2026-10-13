@@ -36,8 +36,10 @@ _Nothing right now._
 - [ ] **Save for offline — follow-ups** (feature done 2026-10-13, see Done):
   - [ ] Pick which video when a page has several streams (today: yt-dlp's choice, else manifests
         in the order the player loaded them, then the biggest file).
-  - [ ] Course lessons all get the course's tab title (Udemy: "Course: … | Udemy"), so folders
-        are "(2)", "(3)"… — read the lesson title from the page instead.
+  - [ ] Course lessons saved through the browser path still get the course's tab title (Udemy:
+        "Course: … | Udemy"), so folders are "(2)", "(3)"… When yt-dlp picks the lesson, the save
+        takes the lesson's own title (but its folder keeps the tab title). Read the lesson title
+        from the page instead, and name the folder after it.
   - [ ] Browser-path DASH (separate .mpd video/audio) — today only yt-dlp handles DASH.
   - [ ] Show "Save for offline" progress in the Downloads view too (today: Library → Offline).
   - [ ] Optional: bundle yt-dlp + ffmpeg into the installer (`extraResources`) for installs with
@@ -69,6 +71,23 @@ _Nothing right now._
   only `winCodeSign-2.6.0` is needed.
 
 ## Done
+
+- [x] 2026-10-13 Library as a page in a tab, like Chrome: **Ctrl+J → bro://downloads**, **Ctrl+Shift+J →
+  bro://offline** (one Library tab, reused; Bookmarks menu has both). Library tabs carry the bridge
+  preload, so they can only show the Library: any other address swaps in a normal tab, extensions
+  never see them, no history entries, and `bridge.ts` only exposes `window.bro` on dist/ui pages.
+  E2E `library-tab-suite.mjs` 7/7.
+- [x] 2026-10-13 Fixed: picking one lecture out of a course took forever ("Looking for the video…" for
+  5+ min, queue blocked): the match filter opened all 534 lectures. Now one `--flat-playlist` listing
+  finds the entry, then only that one is downloaded. Plus a watchdog: yt-dlp silent for 4 min is
+  stopped and the next way in is tried.
+
+- [x] 2026-10-13 Fixed: "Save video" on a Udemy lecture downloaded the whole course (534 lectures) —
+  yt-dlp opens a lecture link as its course. A single save now stops yt-dlp as soon as it reports
+  a playlist (`after_filter` print, before any video is written), retries with a match filter
+  for the entry whose id is in the page address (lecture 45349009), else uses the stream the page
+  plays; failed runs remove what they wrote; no playlist-level meta files. E2E 30/30.
+  (The match filter was replaced the same day by a flat listing — see above.)
 
 - [x] 2026-10-13 Fixed: Udemy save failed with "[udemy:course] assets … HTTP 403". The stream the page
   played was handed to yt-dlp, which mistook `udemy.com/assets/…m3u8` for a course page. Now:
