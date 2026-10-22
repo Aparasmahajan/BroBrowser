@@ -16,7 +16,8 @@ import { extname, join } from 'node:path';
  *    disk are kept, so a retry continues where it stopped.
  *  - Plain files: one connection, resumed with a Range request.
  *
- * DRM (Widevine/FairPlay/SAMPLE-AES) and live streams needs to be handled.
+ * DRM (Widevine/PlayReady/FairPlay/SAMPLE-AES) and live streams are refused: Bro only
+ * saves video that isn't encrypted for a licensed player.
  */
 
 export interface GrabContext {
@@ -37,7 +38,7 @@ export interface GrabContext {
   ffmpeg(args: string[]): Promise<boolean>;
 }
 
-export type GrabOutcome = 'ok' | 'live' | 'network' | 'forbidden' | 'gone' | 'error' | 'stopped';
+export type GrabOutcome = 'ok' | 'drm' | 'live' | 'network' | 'forbidden' | 'gone' | 'error' | 'stopped';
 export interface GrabResult {
   outcome: GrabOutcome;
   error?: string;
@@ -68,7 +69,8 @@ export async function grabHls(ctx: GrabContext, url: string): Promise<GrabResult
     ctx.stage('Reading the stream…');
     const text = await fetchText(ctx, url);
     if (!text.trimStart().startsWith('#EXTM3U')) return { outcome: 'error', error: 'That address is not a video stream.' };
-    
+    if (isDrm(text)) return { outcome: 'drm' };
+
     let videoUrl = url;
     let audioUrl: string | undefined;
     if (/#EXT-X-STREAM-INF/i.test(text)) {
@@ -125,7 +127,17 @@ export async function grabHls(ctx: GrabContext, url: string): Promise<GrabResult
   }
 }
 
-
+/** Is any key in this playlist real DRM (not plain AES-128 HLS)? */
+function isDrm(text: string): boolean {
+  for (const m of text.matchAll(/#EXT-X-(?:SESSION-)?KEY:(.*)/gi)) {
+    const a = attrs(m[1]);
+    const method = (a.METHOD ?? '').toUpperCase();
+    const format = (a.KEYFORMAT ?? 'identity').toLowerCase();
+    if (method === 'NONE') continue;
+    if (method !== 'AES-128' || format !== 'identity') return true;
+  }
+  return false;
+}
 
 function parseMaster(text: string, base: string) {
   const lines = text.split(/\r?\n/).map((l) => l.trim());
@@ -172,7 +184,7 @@ interface Fetch {
 /** Rewrite a media playlist to point at local copies; returns what has to be fetched. */
 async function mirrorPlaylist(ctx: GrabContext, url: string, dir: string, tag: string): Promise<{ local: string; files: Fetch[] }> {
   const text = await fetchText(ctx, url);
-  
+  if (isDrm(text)) throw new DrmError();
   if (/#EXT-X-STREAM-INF/i.test(text)) throw new Error('Nested stream lists are not supported.');
   if (!/#EXT-X-ENDLIST/i.test(text) && !/#EXT-X-PLAYLIST-TYPE:VOD/i.test(text)) throw new LiveError();
 
@@ -483,6 +495,7 @@ async function download(
 
 function failure(e: unknown, ctx: GrabContext): GrabResult {
   if (ctx.stopped()) return { outcome: 'stopped' };
+  if (e instanceof DrmError) return { outcome: 'drm' };
   if (e instanceof LiveError) return { outcome: 'live', error: 'This is a live stream — it can be saved once it has ended.' };
   if (e instanceof HttpError) {
     if (e.status === 401 || e.status === 403) return { outcome: 'forbidden', error: e.message };
