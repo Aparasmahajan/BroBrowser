@@ -32,7 +32,13 @@ is supported by the code but not built here.
   `persist:bro-profile-<id>`. `Browser.profileSession()` wires each session once
   (ad blocking, YouTube shield, downloads, extensions). Current profile = active tab's.
 - Downloads (`downloads.ts`): segmented engine for range-capable http(s) files,
-  Chromium's DownloadItem otherwise; state in `data/downloads.json` (private ones never).
+  Chromium's DownloadItem otherwise, BitTorrent (`torrents.ts`) for magnet links / .torrent files;
+  state in `data/downloads.json` (private ones never). FDM-style queue: `Prefs.maxDownloads`
+  (default 4) run at once, the rest are `queued` and start by priority (high → normal → low), then
+  first-come; "Start now" (`forced`) runs outside the limit; downloads running at quit get their
+  slots back first on the next launch.
+- Settings + Library pages share `src/ui/pages.css` (Chrome-style: header with search, side nav,
+  cards). Toolbar icons are an inline SVG sprite in each page.
 - Right-click: `context-menu.ts`, wired from `TabManager.onContextMenu`.
 - Save for offline (`offline.ts` + `video-tools.ts`): `session.webRequest.onResponseStarted`
   sniffs videos/HLS/DASH per tab (`TabState.hasVideo` lights the toolbar button); a save is a
@@ -58,6 +64,13 @@ is supported by the code but not built here.
   CDN links let it through), DASH through yt-dlp. yt-dlp gets the tab's cookies (temp Netscape
   file, deleted after) + UA + Referer, and is retried with `--impersonate chrome` when refused.
   One save runs at a time (slow links do better that way).
+- Library tabs (`bro://downloads|offline|history|bookmarks|sessions` → `library.html?tab=1#view`):
+  `TabManager` gives them the bridge preload and marks them `internal`; navigating anywhere else
+  replaces the tab (`replaceTab`), `hook()` hides them from extensions, sessions store them as
+  `bro://…`. `Browser.send` also feeds them live updates.
+- A single save whose page yt-dlp reads as a playlist (Udemy lecture → course) is stopped at the
+  `after_filter` print, then `--flat-playlist` finds the entry whose id is in the page URL. Don't
+  use `--match-filters` for that: it opens every entry first (534 Udemy API calls).
 - Never hand yt-dlp a stream URL without `--use-extractors generic`: site extractors match by
   host, e.g. `udemy.com/assets/….m3u8` was treated as a Udemy course → 403.
 - Browser-path HLS: picks the variant for the quality setting (+ its EXT-X-MEDIA audio), mirrors
@@ -77,6 +90,18 @@ is supported by the code but not built here.
   English subtitle variant (`en.*`) gets HTTP 429 from YouTube — keep the explicit list.
 - yt-dlp's catch-all extractors (`Generic`, `HTML5MediaEmbed`) title videos "<page> (1)", so
   only known sites rename a save to the video's own title.
+
+- Torrents use **WebTorrent** (ESM-only → `external` in esbuild, loaded with `import()` on first use).
+  Its WebRTC dependency `webrtc-polyfill` (native `node-datachannel`, fails to build here) is
+  replaced by `stubs/webrtc-polyfill` through `overrides` in package.json — install with
+  `npm install --install-links` so the stub is copied, not linked. Result: TCP/uTP peers, DHT,
+  trackers; no browser (WebRTC) peers. Torrents stop when done (no seeding); the .torrent is kept
+  in `userData/torrents/<infohash>.torrent` so a stopped one resumes (WebTorrent re-checks pieces).
+- Bro pauses a Chromium item itself while it probes ranges or while the item waits in the queue;
+  the `held` set stops that pause from being shown as (or counted as) the user's.
+- Chromium allows 6 connections per host, shared by the session's `net.request`s: a new download
+  from a host already busy with segmented downloads only reaches `will-download` once a socket
+  frees. Queue tests use 1 connection per download for that reason.
 
 ## Environment quirks (this dev machine)
 

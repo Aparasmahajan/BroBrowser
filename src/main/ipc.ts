@@ -7,6 +7,7 @@ import {
   type FindPayload,
   type NavigatePayload,
   type DownloadAction,
+  type DownloadPriority,
   type OfflineAction,
   type OfflineWhat,
   type Prefs,
@@ -139,6 +140,13 @@ export function registerIpc(mw: MainWindow, browser: Browser): void {
     const r = await dialog.showOpenDialog(mw.win, { title: 'Download folder', properties: ['openDirectory', 'createDirectory'] });
     return r.canceled || !r.filePaths[0] ? null : r.filePaths[0];
   });
+  ipcMain.on(Channel.SetDownloadPriority, (_e, p: { id: string; priority: DownloadPriority }) =>
+    browser.downloads.setPriority(String(p.id), p.priority),
+  );
+  ipcMain.handle(Channel.AddDownload, (_e, url: string) => browser.addDownload(String(url ?? '')));
+  ipcMain.on(Channel.OpenDownloadsFolder, () => browser.downloads.openFolder());
+  ipcMain.on(Channel.PauseAllDownloads, () => browser.downloads.pauseAll());
+  ipcMain.on(Channel.ResumeAllDownloads, () => browser.downloads.resumeAll());
 
   // Save for offline + video tools.
   const whats: OfflineWhat[] = ['page+video', 'video', 'page', 'playlist'];

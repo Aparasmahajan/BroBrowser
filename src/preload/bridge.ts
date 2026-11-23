@@ -105,6 +105,11 @@ const api: BroApi = {
   downloadAction: (id, action) => ipcRenderer.send(Channel.DownloadCommand, { id, action }),
   clearDownloads: () => ipcRenderer.send(Channel.ClearDownloads),
   chooseDownloadDir: () => ipcRenderer.invoke(Channel.ChooseDownloadDir) as Promise<string | null>,
+  setDownloadPriority: (id, priority) => ipcRenderer.send(Channel.SetDownloadPriority, { id, priority }),
+  addDownload: (url) => ipcRenderer.invoke(Channel.AddDownload, url) as Promise<string | null>,
+  openDownloadsFolder: () => ipcRenderer.send(Channel.OpenDownloadsFolder),
+  pauseAllDownloads: () => ipcRenderer.send(Channel.PauseAllDownloads),
+  resumeAllDownloads: () => ipcRenderer.send(Channel.ResumeAllDownloads),
 
   showOfflineMenu: () => ipcRenderer.send(Channel.ShowOfflineMenu),
   saveOffline: (what) => ipcRenderer.send(Channel.SaveOffline, what),
@@ -138,4 +143,8 @@ const api: BroApi = {
   platform: process.platform,
 };
 
-contextBridge.exposeInMainWorld('bro', api);
+// Only Bro's own pages (dist/ui/*.html, also inside app.asar) get the bridge — defence in
+// depth for Library tabs, which live in the tab area next to web pages.
+if (location.protocol === 'file:' && /\/dist\/ui\/[\w-]+\.html$/.test(location.pathname)) {
+  contextBridge.exposeInMainWorld('bro', api);
+}

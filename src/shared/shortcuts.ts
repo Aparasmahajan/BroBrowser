@@ -94,7 +94,8 @@ export const COMMANDS = [
   { id: 'app.bookmark', label: 'Bookmark this page', group: 'app', keys: ['CommandOrControl+D'] },
   { id: 'app.library', label: 'Bookmarks & History', group: 'app', keys: ['CommandOrControl+Y'] },
   { id: 'app.history', label: 'History', group: 'app', keys: ['CommandOrControl+H'] },
-  { id: 'app.downloads', label: 'Downloads', group: 'app', keys: ['CommandOrControl+J'] },
+  { id: 'app.downloads', label: 'Downloads (opens in a tab)', group: 'app', keys: ['CommandOrControl+J'] },
+  { id: 'app.offline', label: 'Offline videos (opens in a tab)', group: 'app', keys: ['CommandOrControl+Shift+J'] },
   { id: 'app.saveSession', label: 'Save all tabs as a session', group: 'app', keys: ['CommandOrControl+Shift+D'] },
   { id: 'app.settings', label: 'Settings', group: 'app', keys: ['CommandOrControl+,'] },
 ] as const satisfies readonly CommandDef[];

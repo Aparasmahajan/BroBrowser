@@ -16,7 +16,15 @@ import { mkdir, open, rename, rm, stat, type FileHandle } from 'node:fs/promises
 import { basename, dirname, join, parse } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { JsonStore } from './store';
-import { Event, type DownloadAction, type DownloadInfo, type Prefs } from '../shared/ipc-contract';
+import { TorrentEngine, magnetInfoHash, magnetName } from './torrents';
+import {
+  DOWNLOAD_PRIORITIES,
+  Event,
+  type DownloadAction,
+  type DownloadInfo,
+  type DownloadPriority,
+  type Prefs,
+} from '../shared/ipc-contract';
 
 /** Bro's engine writes here until every byte is in, then renames to the real name. */
 const PART_EXT = '.brodownload';
@@ -29,6 +37,8 @@ const RETRY_LATER_MS = 60_000; // FDM-style: interrupted downloads keep retrying
 const EMIT_MS = 400;
 const PERSIST_MS = 1_000;
 const KEEP = 300; // list entries kept on disk
+const EXPECT_MS = 30_000; // a re-requested Chromium download that never shows up stops holding its slot
+const RANK: Record<DownloadPriority, number> = { high: 0, normal: 1, low: 2 };
 
 interface Segment {
   start: number;
@@ -43,8 +53,11 @@ interface Rec extends DownloadInfo {
   segments?: Segment[];
   etag?: string;
   lastModified?: string;
-  /** Was running when Bro closed/crashed → resume automatically at start. */
-  resumeOnStart?: boolean;
+  /** When it joined the queue (ties within a priority go first-come, first-served). */
+  queuedAt?: number;
+  /** Torrent: the magnet link, or the saved .torrent it continues from. */
+  torrentSource?: string;
+  infoHash?: string;
 }
 
 interface Ctx {
@@ -55,7 +68,7 @@ interface Ctx {
 
 const PUBLIC_KEYS: (keyof DownloadInfo)[] = [
   'id', 'url', 'filename', 'path', 'total', 'received', 'speed', 'status', 'error', 'engine',
-  'connections', 'resumable', 'retries', 'started', 'finished', 'private', 'profileId',
+  'connections', 'resumable', 'retries', 'started', 'finished', 'private', 'profileId', 'priority', 'forced',
 ];
 
 /**
@@ -68,15 +81,28 @@ const PUBLIC_KEYS: (keyof DownloadInfo)[] = [
  *  - BROWSER engine (Chromium's DownloadItem) for everything else (no range
  *    support, blob:/data: URLs, POST-only links): pause/resume within a run,
  *    automatic resume after network interruptions; "Retry" starts it again.
+ *  - TORRENT engine (torrents.ts) for magnet links and .torrent files.
+ *
+ * Like Free Download Manager, at most `Prefs.maxDownloads` run at once; the rest
+ * are 'queued' and start by priority (high → normal → low), then first-come.
+ * "Start now" runs one outside the limit.
  */
 export class DownloadManager {
   private readonly store = new JsonStore<Rec[]>('downloads', []);
   private readonly recs = new Map<string, Rec>();
   private readonly jobs = new Map<string, SegmentedJob>();
   private readonly items = new Map<string, DownloadItem>();
+  private readonly torrents = new TorrentEngine();
   private readonly sessions = new Map<string, Session>(); // partition → session (for resume)
   private readonly askNext = new Set<string>(); // URLs from "Save … as"
+  /** Chromium downloads Bro asked for again (Retry / restart): URL → how to treat it when it arrives. */
+  private readonly expecting = new Map<string, { priority: DownloadPriority; now: boolean; timer: NodeJS.Timeout }>();
   private readonly retryTimers = new Map<string, NodeJS.Timeout>();
+  /** Chromium items Bro paused itself (deciding on the engine): their "paused" isn't the user's. */
+  private readonly held = new Set<string>();
+  /** Running when Bro last closed: they continue before the rest of the queue. */
+  private readonly wasRunning: Rec[] = [];
+  private scheduling = false;
   private emitTimer: NodeJS.Timeout | null = null;
   private persistTimer: NodeJS.Timeout | null = null;
 
@@ -88,15 +114,17 @@ export class DownloadManager {
     private resolveSession: (partition: string) => Session,
   ) {
     for (const r of this.store.get()) {
-      // Anything unfinished from the last run: segmented ones can continue;
-      // Chromium's can't (its item is gone), so they become "Retry".
-      if (r.status === 'downloading' || r.status === 'paused' || r.status === 'interrupted') {
-        const wasRunning = r.status === 'downloading' || r.status === 'interrupted';
-        if (r.engine === 'segmented' && r.segments) {
-          r.status = 'paused';
+      r.priority = DOWNLOAD_PRIORITIES.includes(r.priority) ? r.priority : 'normal';
+      r.forced = false;
+      // Anything unfinished from the last run: segmented downloads and torrents continue
+      // (running ones rejoin the queue); Chromium's can't (its item is gone) — a queued one
+      // is requested again when its turn comes, a started one becomes "Retry".
+      if (r.status === 'downloading' || r.status === 'paused' || r.status === 'interrupted' || r.status === 'queued') {
+        if (r.engine === 'segmented' || r.engine === 'torrent') {
+          if (r.status === 'downloading' || r.status === 'interrupted') this.wasRunning.push(r);
+          if (r.status !== 'paused') r.status = 'queued';
           r.resumable = true;
-          r.resumeOnStart = wasRunning;
-        } else {
+        } else if (r.status !== 'queued') {
           r.status = 'failed';
           r.resumable = false;
           r.error = 'Bro was closed while this was downloading — Retry to start again.';
@@ -114,18 +142,19 @@ export class DownloadManager {
     sess.on('will-download', (e, item, wc) => this.onWillDownload(e, item, wc, ctx));
   }
 
-  /** After startup: continue downloads that were running when Bro last closed or crashed. */
+  /** After startup: continue downloads that were running (or waiting) when Bro last closed or crashed. */
   init(): void {
-    for (const r of this.recs.values()) {
-      if (!r.resumeOnStart) continue;
-      r.resumeOnStart = false;
-      setTimeout(() => this.resume(r), 3000);
-    }
+    setTimeout(() => {
+      // Ones that were running get their slots back first; then the queue goes by priority.
+      for (const r of this.wasRunning.sort(byQueue)) if (r.status === 'queued' && this.busy() < this.limit()) this.run(r);
+      this.wasRunning.length = 0;
+      this.schedule();
+    }, 3000);
   }
 
   /** A profile is being removed: stop its downloads (finished files stay on disk). */
   dropProfile(profileId: string): void {
-    for (const r of this.recs.values()) if (r.profileId === profileId && (isActive(r) || r.status === 'paused')) this.cancel(r);
+    for (const r of this.recs.values()) if (r.profileId === profileId && isLive(r)) this.cancel(r);
   }
 
   private sessionOf(r: Rec): Session {
@@ -158,6 +187,12 @@ export class DownloadManager {
       case 'retry':
         this.retry(r);
         break;
+      case 'start-now':
+        if (r.status === 'queued' || r.status === 'paused' || r.status === 'interrupted') {
+          r.forced = true;
+          this.run(r);
+        }
+        break;
       case 'open':
         if (r.status === 'completed') void shell.openPath(r.path);
         break;
@@ -167,33 +202,238 @@ export class DownloadManager {
         else void shell.openPath(dirname(r.path));
         break;
       case 'remove':
-        if (isActive(r)) this.cancel(r);
+        if (isLive(r)) this.cancel(r);
+        if (r.engine === 'torrent') this.torrents.forget(r.torrentSource);
         this.recs.delete(id);
         this.changed(true);
+        this.schedule();
         break;
     }
   }
 
-  /** Drop finished, cancelled and failed entries from the list (files stay). */
-  clear(): void {
-    for (const [id, r] of this.recs) if (!isActive(r) && r.status !== 'paused') this.recs.delete(id);
+  setPriority(id: string, priority: DownloadPriority): void {
+    const r = this.recs.get(id);
+    if (!r || !DOWNLOAD_PRIORITIES.includes(priority)) return;
+    r.priority = priority;
     this.changed(true);
   }
 
-  /** Called on quit: save where every segment got to so they can resume next launch. */
+  pauseAll(): void {
+    for (const r of this.recs.values()) if (isActive(r) || r.status === 'queued') this.pause(r);
+  }
+
+  /** Paused downloads rejoin the queue in priority order (the limit still applies). */
+  resumeAll(): void {
+    for (const r of [...this.recs.values()].sort(byQueue)) if (r.status === 'paused') this.resume(r);
+  }
+
+  openFolder(): void {
+    void shell.openPath(this.dir());
+  }
+
+  /** Drop finished, cancelled and failed entries from the list (files stay). */
+  clear(): void {
+    for (const [id, r] of this.recs) if (!isLive(r)) this.recs.delete(id);
+    this.changed(true);
+  }
+
+  /** Called on quit: save where every segment got to; running ones rejoin the queue next launch. */
   flush(): void {
-    for (const r of this.recs.values()) if (r.engine === 'segmented' && r.status === 'downloading') r.resumeOnStart = true;
     for (const job of this.jobs.values()) job.stopForExit();
+    void this.torrents.dispose();
     this.persist();
     this.store.flush();
+  }
+
+  // --- Queue -----------------------------------------------------------------------
+
+  /** How many downloads may run at once. */
+  private limit(): number {
+    return Math.min(10, Math.max(1, Math.round(this.prefs().maxDownloads || 4)));
+  }
+
+  /** Slots in use: running downloads (not "Start now" ones) + Chromium ones Bro re-requested. */
+  private busy(except?: Rec): number {
+    let n = [...this.expecting.values()].filter((e) => e.now).length;
+    for (const r of this.recs.values()) {
+      if (r === except || r.forced) continue;
+      // A Chromium download retrying after a network blip comes back within seconds — keep its slot.
+      if (r.status === 'downloading' || (r.status === 'interrupted' && r.engine === 'browser')) n++;
+    }
+    return n;
+  }
+
+  /** Start queued downloads while there are free slots (call after anything frees one). */
+  schedule(): void {
+    if (this.scheduling) return;
+    this.scheduling = true;
+    try {
+      const waiting = [...this.recs.values()].filter((r) => r.status === 'queued').sort(byQueue);
+      for (const r of waiting) {
+        if (this.busy() >= this.limit()) break;
+        if (r.status === 'queued') this.run(r);
+      }
+    } finally {
+      this.scheduling = false;
+    }
+  }
+
+  /** Run now if a slot is free (or it was "Start now"-ed), otherwise wait in the queue. */
+  private runOrQueue(r: Rec): void {
+    if (r.forced || this.busy(r) < this.limit()) return this.run(r);
+    this.cancelLater(r.id);
+    this.items.get(r.id)?.pause();
+    r.status = 'queued';
+    r.queuedAt = Date.now();
+    r.speed = 0;
+    this.changed(true);
+  }
+
+  /** Start (or continue) a download with its engine, whatever the limit says. */
+  private run(r: Rec): void {
+    this.cancelLater(r.id);
+    r.error = undefined;
+    if (r.engine === 'segmented') {
+      if (this.jobs.has(r.id)) return;
+      r.status = 'downloading';
+      this.startSegmented(r);
+    } else if (r.engine === 'torrent') {
+      r.status = 'downloading';
+      this.startTorrent(r);
+    } else {
+      const item = this.items.get(r.id);
+      if (item && item.getState() === 'progressing') {
+        r.status = 'downloading';
+        if (item.isPaused()) item.resume();
+      } else if (item && item.getState() === 'interrupted' && item.canResume()) {
+        r.status = 'downloading';
+        item.resume();
+      } else {
+        return this.restartBrowser(r, true);
+      }
+    }
+    this.changed(true);
+  }
+
+  // --- Torrents --------------------------------------------------------------------
+
+  /** A magnet link, or a .torrent file Bro fetched. Returns an error to show, or null. */
+  addTorrent(source: string, ctx: Ctx, from: { url?: string; name?: string } = {}): string | null {
+    const magnet = /^magnet:/i.test(source);
+    const infoHash = magnet ? magnetInfoHash(source) : undefined;
+    if (magnet && !infoHash) return 'That magnet link has no info hash (xt=urn:btih:…).';
+    const dup = infoHash && [...this.recs.values()].find((r) => r.infoHash === infoHash && r.status !== 'cancelled' && r.status !== 'failed');
+    if (dup) return `“${dup.filename}” is already in your downloads.`;
+    const name = safeName((magnet ? magnetName(source) : from.name) || (infoHash ? `Torrent ${infoHash.slice(0, 8)}` : 'Torrent'));
+    const r: Rec = {
+      id: randomBytes(6).toString('hex'),
+      url: from.url ?? source,
+      filename: name,
+      path: join(this.dir(), name),
+      total: -1,
+      received: 0,
+      speed: 0,
+      status: 'queued',
+      engine: 'torrent',
+      connections: 0,
+      resumable: true,
+      retries: 0,
+      started: Date.now(),
+      private: ctx.private,
+      profileId: ctx.profileId,
+      partition: ctx.partition,
+      priority: 'normal',
+      forced: false,
+      torrentSource: source,
+      infoHash,
+    };
+    this.recs.set(r.id, r);
+    this.runOrQueue(r);
+    this.changed(true);
+    return null;
+  }
+
+  private startTorrent(r: Rec): void {
+    const dir = dirname(r.path); // fixed when it was added, so a new download folder doesn't break resuming
+    const mine = () => r.status === 'downloading' && this.recs.get(r.id) === r;
+    void this.torrents.start(r.id, r.torrentSource ?? '', dir, !r.private, {
+      metadata: (m) => {
+        r.filename = m.name;
+        r.path = join(dir, m.name);
+        r.total = m.length;
+        r.infoHash = m.infoHash;
+        if (m.saved && m.saved !== r.torrentSource) {
+          this.torrents.forget(r.torrentSource); // the fetched incoming-….torrent, if that's what it was
+          r.torrentSource = m.saved; // continues without asking peers for the metadata again
+        }
+        this.changed(true);
+      },
+      progress: (p) => {
+        if (!mine()) return;
+        r.received = p.received;
+        if (p.total > 0) r.total = p.total;
+        r.speed = p.speed;
+        r.connections = p.peers;
+        this.changed();
+      },
+      done: () => {
+        if (!mine()) return;
+        r.status = 'completed';
+        r.received = r.total;
+        this.ended(r);
+      },
+      error: (message) => {
+        if (!mine()) return;
+        r.status = 'failed';
+        r.error = message;
+        this.ended(r);
+      },
+    });
+  }
+
+  /** A download stopped for good (done / failed): free its slot. */
+  private ended(r: Rec): void {
+    r.finished = Date.now();
+    r.speed = 0;
+    r.connections = 0;
+    r.forced = false;
+    this.changed(true);
+    this.schedule();
+  }
+
+  /** A downloaded .torrent file: open it as a torrent instead of keeping the file. */
+  private takeTorrentFile(item: DownloadItem, ctx: Ctx): void {
+    const file = join(this.torrents.metaDir, `incoming-${randomBytes(6).toString('hex')}.torrent`);
+    const url = item.getURL();
+    const name = parse(item.getFilename() || 'download.torrent').name;
+    void mkdir(this.torrents.metaDir, { recursive: true }).catch(() => {});
+    item.setSavePath(file);
+    item.once('done', (_e, state) => {
+      if (state !== 'completed') return;
+      const err = this.addTorrent(file, ctx, { url, name });
+      if (err) {
+        console.warn('[torrent]', err);
+        this.torrents.forget(file);
+      }
+    });
   }
 
   // --- Chromium hands us a new download ------------------------------------------
 
   private onWillDownload(_e: ElectronEvent, item: DownloadItem, wc: WebContents, ctx: Ctx): void {
     const url = item.getURL();
+    const isTorrent = item.getMimeType() === 'application/x-bittorrent' || /\.torrent$/i.test(item.getFilename());
+    if (isTorrent && this.prefs().torrents && !this.askNext.has(url)) return this.takeTorrentFile(item, ctx);
+
+    const expected = this.expecting.get(url);
+    if (expected) {
+      clearTimeout(expected.timer);
+      this.expecting.delete(url);
+    }
     const target = uniquePath(join(this.dir(), item.getFilename() || 'download'));
     const ask = this.askNext.delete(url) || this.prefs().askWhereToSave;
+    // No free slot → it waits in the queue (Chromium's item stays paused meanwhile).
+    const queued = !expected?.now && this.busy() >= this.limit();
     // Chromium needs a path right now; it writes beside the target and we move it into place.
     item.setSavePath(target + BROWSER_PART_EXT);
 
@@ -205,7 +445,7 @@ export class DownloadManager {
       total: item.getTotalBytes() || -1,
       received: 0,
       speed: 0,
-      status: 'downloading',
+      status: queued ? 'queued' : 'downloading',
       engine: 'browser',
       connections: 1,
       resumable: false,
@@ -215,15 +455,19 @@ export class DownloadManager {
       profileId: ctx.profileId,
       partition: ctx.partition,
       referrer: safeUrl(wc?.getURL()),
+      priority: expected?.priority ?? 'normal',
+      forced: false,
+      queuedAt: queued ? Date.now() : undefined,
     };
     this.recs.set(r.id, r);
     this.trackItem(r, item);
     this.changed(true);
 
     const rangeable = /^https?:/i.test(r.url) && r.total > 0;
-    if (!ask && !rangeable) return; // plain Chromium download
+    if (!ask && !rangeable && !queued) return; // plain Chromium download
+    this.held.add(r.id);
     item.pause();
-    void this.decide(r, item, ask);
+    void this.decide(r, item, ask).finally(() => this.held.delete(r.id));
   }
 
   /** Ask for a location if needed, then take over with the segmented engine if the server allows. */
@@ -253,8 +497,8 @@ export class DownloadManager {
       r.etag = probe.etag;
       r.lastModified = probe.lastModified;
       r.received = 0;
-      this.startSegmented(r);
-    } else if (item.getState() === 'progressing') {
+      if (r.status === 'downloading') this.startSegmented(r); // a queued one starts when its turn comes
+    } else if (item.getState() === 'progressing' && r.status === 'downloading') {
       item.resume();
     }
     this.changed(true);
@@ -292,16 +536,16 @@ export class DownloadManager {
         }
       } else {
         if (got > lastBytes) fails = 0;
-        r.status = item.isPaused() ? 'paused' : 'downloading';
+        // An item Bro holds paused (deciding, or waiting in the queue) keeps its status.
+        const heldByBro = item.isPaused() && (this.held.has(r.id) || r.status === 'queued');
+        if (!heldByBro) r.status = item.isPaused() ? 'paused' : 'downloading';
       }
       this.changed();
     });
     item.once('done', (_e, state) => {
       if (!this.items.has(r.id)) return;
       this.items.delete(r.id);
-      r.speed = 0;
       r.connections = 0;
-      r.finished = Date.now();
       if (state === 'completed') {
         r.received = item.getReceivedBytes();
         r.total = r.received;
@@ -312,7 +556,7 @@ export class DownloadManager {
         r.status = 'failed';
         r.error = 'The download was interrupted and the server can’t continue it — Retry to start again.';
       }
-      this.changed(true);
+      this.ended(r);
     });
   }
 
@@ -334,7 +578,9 @@ export class DownloadManager {
       r.status = 'failed';
       r.error = `Downloaded, but couldn’t move it into place: ${errText(e)}`;
     }
+    r.finished = Date.now();
     this.changed(true);
+    this.schedule();
   }
 
   // --- Segmented engine ------------------------------------------------------------
@@ -345,15 +591,16 @@ export class DownloadManager {
       saved: () => this.persistSoon(),
       finished: () => {
         this.jobs.delete(r.id);
-        this.changed(true);
+        this.ended(r);
       },
       failedForNow: () => {
-        // Too many failures in a row: stop, and keep retrying in the background.
+        // Too many failures in a row: stop (freeing the slot), and keep retrying in the background.
         this.jobs.delete(r.id);
         this.later(r.id, RETRY_LATER_MS, () => {
           if (r.status === 'interrupted') this.resume(r);
         });
         this.changed(true);
+        this.schedule();
       },
     });
     this.jobs.set(r.id, job);
@@ -366,28 +613,28 @@ export class DownloadManager {
     if (job) {
       job.pause();
       this.jobs.delete(r.id);
+    } else if (r.engine === 'torrent') {
+      void this.torrents.stop(r.id);
     } else {
       const item = this.items.get(r.id);
       if (item && item.getState() === 'progressing') item.pause();
     }
-    if (isActive(r)) r.status = 'paused';
+    if (isActive(r) || r.status === 'queued') r.status = 'paused';
     r.speed = 0;
+    r.connections = 0;
+    r.forced = false;
     this.changed(true);
+    this.schedule();
   }
 
   private resume(r: Rec): void {
-    this.cancelLater(r.id);
-    if (r.engine === 'segmented') {
-      if (this.jobs.has(r.id) || r.status === 'completed') return;
-      r.status = 'downloading';
-      r.error = undefined;
-      this.startSegmented(r);
-    } else {
+    if (r.status === 'completed' || r.status === 'downloading') return;
+    if (r.engine === 'browser') {
+      // Chromium can continue only while its item is alive; otherwise start over (new list entry).
       const item = this.items.get(r.id);
-      if (item && item.canResume()) item.resume();
-      else return this.retry(r);
+      if (!item || !(item.canResume() || item.isPaused())) return this.retry(r);
     }
-    this.changed(true);
+    this.runOrQueue(r);
   }
 
   private cancel(r: Rec): void {
@@ -399,30 +646,51 @@ export class DownloadManager {
     } else if (r.engine === 'segmented') {
       void rm(r.path + PART_EXT, { force: true }).catch(() => {});
     }
+    // A torrent's partial files go too (like a cancelled download's .part file).
+    if (r.engine === 'torrent' && r.status !== 'completed') void this.torrents.stop(r.id, true);
     const item = this.items.get(r.id);
     if (item && item.getState() !== 'completed') item.cancel();
     if (r.status !== 'completed') r.status = 'cancelled';
     r.speed = 0;
     r.connections = 0;
+    r.forced = false;
     this.changed(true);
+    this.schedule();
   }
 
-  /** Start again from scratch (failed / cancelled / unresumable). */
+  /** Start again from scratch (failed / cancelled / unresumable). Joins the queue if it's full. */
   private retry(r: Rec): void {
     this.cancelLater(r.id);
+    r.error = undefined;
     if (r.engine === 'segmented') {
+      if (this.jobs.has(r.id)) return;
       r.segments = undefined;
       r.received = 0;
       r.retries = 0;
-      r.status = 'downloading';
-      r.error = undefined;
       void rm(r.path + PART_EXT, { force: true }).catch(() => {});
-      this.startSegmented(r);
-      this.changed(true);
-      return;
+      return this.runOrQueue(r);
     }
-    // Chromium engine: ask its session to download the URL again (new list entry).
+    if (r.engine === 'torrent') {
+      // Pieces already on disk are checked and kept — only what's missing is fetched.
+      r.retries = 0;
+      return this.runOrQueue(r);
+    }
+    this.restartBrowser(r, r.forced);
+  }
+
+  /**
+   * Chromium engine: ask the session to download the URL again (a new list entry).
+   * `now` = its turn in the queue has come, so it starts without queueing again.
+   */
+  private restartBrowser(r: Rec, now: boolean): void {
     this.recs.delete(r.id);
+    const prev = this.expecting.get(r.url);
+    if (prev) clearTimeout(prev.timer);
+    const timer = setTimeout(() => {
+      this.expecting.delete(r.url);
+      this.schedule();
+    }, EXPECT_MS);
+    this.expecting.set(r.url, { priority: r.priority, now, timer });
     this.sessionOf(r).downloadURL(r.url, r.referrer ? { headers: { Referer: r.referrer } } : undefined);
     this.changed(true);
   }
@@ -851,6 +1119,16 @@ function split(total: number, n: number): Segment[] {
 const remaining = (s: Segment) => Math.max(0, s.end - s.start + 1 - s.done);
 const sum = (segs: Segment[]) => segs.reduce((a, s) => a + Math.min(s.done, s.end - s.start + 1), 0);
 const isActive = (r: Rec) => r.status === 'downloading' || r.status === 'interrupted';
+/** Not finished yet: running, waiting in the queue, paused or retrying. */
+const isLive = (r: Rec) => isActive(r) || r.status === 'queued' || r.status === 'paused';
+/** Queue order: priority, then who asked first. */
+const byQueue = (a: Rec, b: Rec) => RANK[a.priority] - RANK[b.priority] || (a.queuedAt ?? a.started) - (b.queuedAt ?? b.started);
+
+/** A torrent's name as a file/folder name (names come from strangers on the internet). */
+function safeName(name: string): string {
+  const clean = name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/, '').trim().slice(0, 200);
+  return clean || 'Torrent';
+}
 
 /** "file.zip" → "file (1).zip" … until nothing (incl. a partial download) is in the way. */
 function uniquePath(p: string): string {

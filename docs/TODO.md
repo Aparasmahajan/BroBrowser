@@ -22,22 +22,31 @@ _Nothing right now._
   uBlock (installed in the dev profile) logs errors because of it. Reinstalling
   the extension does not help. Could be shimmed from `webContents` navigation events.
 
-- [ ] **Download queue + limits** (like Free Download Manager) — requested 2026-10-12:
-  - [ ] Max simultaneous downloads (e.g. 3); extra ones wait in a queue and start automatically.
-  - [ ] Priority per download (High / Normal / Low) + move up/down in the queue; high
-        priority gets connections first.
+- [~] **Download queue + limits** (like Free Download Manager) — requested 2026-10-12:
+  - [x] 2026-10-13 Max simultaneous downloads (Settings → Downloads, 1–10, default 4); extra ones
+        wait in a queue and start automatically. "Start now" skips the queue.
+  - [x] 2026-10-13 Priority per download (High / Normal / Low) — sets the queue order.
+  - [ ] Move up/down within a priority; high priority also getting more connections.
   - [ ] Global speed limit (e.g. cap Bro's downloads at 2 MB/s so browsing stays fast) and
-        optional per-download limit.
-  - [ ] Pause all / Resume all; “start queued downloads at a set time” (scheduler).
-  - [ ] Where: `src/main/downloads.ts` (queue + token-bucket throttle in `SegmentedJob`;
-        Chromium-engine items can only be paused/resumed, not throttled), Downloads view
-        controls, Settings → Downloads.
+        optional per-download limit (token bucket in `SegmentedJob`; Chromium-engine items can
+        only be paused/resumed, not throttled; WebTorrent has `throttleDownload`).
+  - [x] 2026-10-13 Pause all / Resume all.  [ ] “Start queued downloads at a set time” (scheduler).
+
+- [ ] **Torrents — follow-ups** (magnet + .torrent support done 2026-10-13):
+  - [ ] Optional seeding (ratio / time limit) — today a torrent stops when it finishes.
+  - [ ] Pick which files of a multi-file torrent to download.
+  - [ ] Cancelling a *paused* torrent keeps its partial files (only a running one is deleted).
+  - [ ] Real-world swarm not tested on this network (BitTorrent traffic seems blocked here: no
+        peers for a public torrent); tested end to end with a local tracker + seeder.
+  - [ ] Packaging: check `npm run pack` keeps `utp-native`'s prebuilt `.node` outside the asar.
 
 - [ ] **Save for offline — follow-ups** (feature done 2026-10-13, see Done):
   - [ ] Pick which video when a page has several streams (today: yt-dlp's choice, else manifests
         in the order the player loaded them, then the biggest file).
-  - [ ] Course lessons all get the course's tab title (Udemy: "Course: … | Udemy"), so folders
-        are "(2)", "(3)"… — read the lesson title from the page instead.
+  - [ ] Course lessons saved through the browser path still get the course's tab title (Udemy:
+        "Course: … | Udemy"), so folders are "(2)", "(3)"… When yt-dlp picks the lesson, the save
+        takes the lesson's own title (but its folder keeps the tab title). Read the lesson title
+        from the page instead, and name the folder after it.
   - [ ] Browser-path DASH (separate .mpd video/audio) — today only yt-dlp handles DASH.
   - [ ] Show "Save for offline" progress in the Downloads view too (today: Library → Offline).
   - [ ] Optional: bundle yt-dlp + ffmpeg into the installer (`extraResources`) for installs with
@@ -69,6 +78,28 @@ _Nothing right now._
   only `winCodeSign-2.6.0` is needed.
 
 ## Done
+
+- [x] 2026-10-13 Chrome-style Settings and Library/Downloads pages (header search, side nav, cards,
+  switches; downloads grouped by day with file-type tiles, priority menu, "New download" box for
+  links and magnets). Toolbar: SVG icons; Downloads button always shown with a progress ring;
+  Save-for-offline no longer greyed out on non-video pages (a dot marks a found video).
+
+- [x] 2026-10-13 Library as a page in a tab, like Chrome: **Ctrl+J → bro://downloads**, **Ctrl+Shift+J →
+  bro://offline** (one Library tab, reused; Bookmarks menu has both). Library tabs carry the bridge
+  preload, so they can only show the Library: any other address swaps in a normal tab, extensions
+  never see them, no history entries, and `bridge.ts` only exposes `window.bro` on dist/ui pages.
+  E2E `library-tab-suite.mjs` 7/7.
+- [x] 2026-10-13 Fixed: picking one lecture out of a course took forever ("Looking for the video…" for
+  5+ min, queue blocked): the match filter opened all 534 lectures. Now one `--flat-playlist` listing
+  finds the entry, then only that one is downloaded. Plus a watchdog: yt-dlp silent for 4 min is
+  stopped and the next way in is tried.
+
+- [x] 2026-10-13 Fixed: "Save video" on a Udemy lecture downloaded the whole course (534 lectures) —
+  yt-dlp opens a lecture link as its course. A single save now stops yt-dlp as soon as it reports
+  a playlist (`after_filter` print, before any video is written), retries with a match filter
+  for the entry whose id is in the page address (lecture 45349009), else uses the stream the page
+  plays; failed runs remove what they wrote; no playlist-level meta files. E2E 30/30.
+  (The match filter was replaced the same day by a flat listing — see above.)
 
 - [x] 2026-10-13 Fixed: Udemy save failed with "[udemy:course] assets … HTTP 403". The stream the page
   played was handed to yt-dlp, which mistook `udemy.com/assets/…m3u8` for a course page. Now:

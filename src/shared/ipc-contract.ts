@@ -99,6 +99,11 @@ export const Channel = {
   DownloadCommand: 'dl:action',         // payload: { id, action: DownloadAction }
   ClearDownloads: 'dl:clear',           // remove finished/failed entries from the list
   ChooseDownloadDir: 'dl:choose-dir',   // invoke → string | null (picked folder)
+  SetDownloadPriority: 'dl:priority',   // payload: { id, priority: DownloadPriority }
+  AddDownload: 'dl:add',                // invoke url | magnet → string | null (error)
+  OpenDownloadsFolder: 'dl:open-folder',
+  PauseAllDownloads: 'dl:pause-all',
+  ResumeAllDownloads: 'dl:resume-all',
 
   // Save for offline (page snapshot + its videos) and the video tools behind it.
   ShowOfflineMenu: 'off:menu',          // pop up the "Save for offline" menu for the active tab
@@ -151,8 +156,13 @@ export interface ProfilesState {
   current: string; // profile of the active (non-private) tab — new tabs open in it
 }
 
-export type DownloadStatus = 'downloading' | 'paused' | 'interrupted' | 'completed' | 'cancelled' | 'failed';
-export type DownloadAction = 'pause' | 'resume' | 'cancel' | 'retry' | 'open' | 'show' | 'remove';
+/** 'queued' = waiting for a free slot (Settings → Downloads → simultaneous downloads). */
+export type DownloadStatus = 'queued' | 'downloading' | 'paused' | 'interrupted' | 'completed' | 'cancelled' | 'failed';
+/** 'start-now' runs a queued download straight away, outside the simultaneous-downloads limit. */
+export type DownloadAction = 'pause' | 'resume' | 'cancel' | 'retry' | 'open' | 'show' | 'remove' | 'start-now';
+/** Queue order, like Free Download Manager: high starts before normal before low. */
+export type DownloadPriority = 'high' | 'normal' | 'low';
+export const DOWNLOAD_PRIORITIES: DownloadPriority[] = ['high', 'normal', 'low'];
 
 export interface DownloadInfo {
   id: string;
@@ -164,9 +174,11 @@ export interface DownloadInfo {
   speed: number;         // bytes/s, 0 when idle
   status: DownloadStatus;
   error?: string;
-  /** 'segmented' = Bro's multi-connection engine; 'browser' = Chromium's own downloader. */
-  engine: 'segmented' | 'browser';
-  connections: number;   // live connections right now
+  /** 'segmented' = Bro's multi-connection engine; 'browser' = Chromium's own downloader; 'torrent' = BitTorrent. */
+  engine: 'segmented' | 'browser' | 'torrent';
+  connections: number;   // live connections right now (peers, for a torrent)
+  priority: DownloadPriority;
+  forced: boolean;       // started with "Start now" — not counted against the limit
   resumable: boolean;    // can continue from where it stopped (incl. after a restart)
   retries: number;       // automatic retries so far
   started: number;
@@ -252,6 +264,8 @@ export interface Prefs {
   downloadDir: string;           // '' = the system Downloads folder
   askWhereToSave: boolean;
   downloadConnections: number;   // max parallel connections per download (1–16)
+  maxDownloads: number;          // downloads running at once (1–10); the rest wait in the queue
+  torrents: boolean;             // open magnet links and .torrent files in Bro (off = hand them to the system)
   videoQuality: number;          // offline videos: max height (360/480/720/1080), 0 = best, -1 = audio only
   videoSubtitles: boolean;       // offline videos: also save English subtitles
 }
@@ -379,6 +393,11 @@ export interface BroApi {
   downloadAction(id: string, action: DownloadAction): void;
   clearDownloads(): void;
   chooseDownloadDir(): Promise<string | null>;
+  setDownloadPriority(id: string, priority: DownloadPriority): void;
+  addDownload(url: string): Promise<string | null>;
+  openDownloadsFolder(): void;
+  pauseAllDownloads(): void;
+  resumeAllDownloads(): void;
 
   showOfflineMenu(): void;
   saveOffline(what: OfflineWhat): void;

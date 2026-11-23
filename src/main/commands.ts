@@ -64,7 +64,8 @@ export function commandHandlers(mw: MainWindow, browser: Browser): Record<Comman
     'app.bookmark': () => browser.bookmarkActiveTab(),
     'app.library': () => browser.toggleLibrary(),
     'app.history': () => browser.openLibrary('history'),
-    'app.downloads': () => browser.openLibrary('downloads'),
+    'app.downloads': () => browser.openLibraryTab('downloads'),
+    'app.offline': () => browser.openLibraryTab('offline'),
     'app.saveSession': () => browser.saveSessionNow(),
     'app.settings': () => browser.toggleSettings(),
   };

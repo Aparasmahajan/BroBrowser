@@ -47,8 +47,81 @@ function flash(el: HTMLElement, text: string, kind: 'ok' | 'err' = 'ok'): void {
 
 $('close').addEventListener('click', () => bro.closeSettings());
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') bro.closeSettings();
+  if (e.key !== 'Escape') return;
+  // Like Chrome: Esc first clears the search box, then closes.
+  if (searchBox.value) {
+    searchBox.value = '';
+    filterSettings();
+  } else bro.closeSettings();
 });
+
+// --- Side nav + search (Chrome-style page) -----------------------------------
+const main = $('main');
+const sections = [...document.querySelectorAll<HTMLElement>('.section')];
+const navLinks = [...document.querySelectorAll<HTMLAnchorElement>('#side-nav a')];
+const searchBox = $<HTMLInputElement>('settings-search');
+
+for (const a of navLinks) {
+  a.addEventListener('click', (e) => {
+    e.preventDefault();
+    if (searchBox.value) {
+      searchBox.value = '';
+      filterSettings();
+    }
+    document.getElementById(a.hash.slice(1))?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+}
+
+/** Highlight the section being read. */
+function syncNav(): void {
+  const top = main.getBoundingClientRect().top + 24;
+  let current = sections[0];
+  for (const s of sections) if (!s.hidden && s.getBoundingClientRect().top <= top) current = s;
+  // Scrolled to the bottom: the last section counts even if it's short.
+  if (main.scrollTop + main.clientHeight >= main.scrollHeight - 2) current = sections.filter((s) => !s.hidden).at(-1) ?? current;
+  for (const a of navLinks) a.classList.toggle('active', a.hash === `#${current?.id}`);
+}
+main.addEventListener('scroll', syncNav, { passive: true });
+syncNav();
+
+/** Rows inside a section's cards that can be shown or hidden on their own. */
+const ROW_SELECTOR = '.card > .row, .card > .radio-row, .card > .note';
+
+/** Chrome-style search: keep the sections (and rows) that mention the words. */
+function filterSettings(): void {
+  const q = searchBox.value.trim().toLowerCase();
+  let any = false;
+  for (const s of sections) {
+    const rows = [...s.querySelectorAll<HTMLElement>(ROW_SELECTOR)];
+    rows.forEach((r) => (r.hidden = false));
+    s.querySelectorAll<HTMLElement>('.card, .section-subtitle').forEach((c) => (c.hidden = false));
+    if (!q) {
+      s.hidden = false;
+      continue;
+    }
+    const title = s.querySelector('.section-title')?.textContent?.toLowerCase() ?? '';
+    const match = s.textContent?.toLowerCase().includes(q) ?? false;
+    s.hidden = !match;
+    any ||= match;
+    if (!match || title.includes(q)) continue;
+    // Only some rows match: hide the rest, and any card left empty.
+    const hits = rows.filter((r) => r.textContent?.toLowerCase().includes(q));
+    if (!hits.length) continue; // the match is in dynamic content (shortcut list…) — show it all
+    for (const r of rows) r.hidden = !hits.includes(r);
+    s.querySelectorAll<HTMLElement>('.card').forEach((c) => {
+      const own = [...c.querySelectorAll<HTMLElement>(':scope > .row, :scope > .radio-row, :scope > .note')];
+      if (own.length && own.every((r) => r.hidden)) {
+        c.hidden = true;
+        const sub = c.previousElementSibling;
+        if (sub instanceof HTMLElement && sub.classList.contains('section-subtitle')) sub.hidden = true;
+      }
+    });
+  }
+  $('no-results').hidden = !q || any;
+  main.scrollTop = 0;
+  syncNav();
+}
+searchBox.addEventListener('input', filterSettings);
 
 // --- Screen-share invisibility --------------------------------------------
 const pill = $('capture-pill');
@@ -141,6 +214,9 @@ function renderPrefs(p: Prefs): void {
   $('dl-ask-text').textContent = p.askWhereToSave ? 'ON' : 'OFF';
   $<HTMLInputElement>('dl-conn').value = String(p.downloadConnections);
   $('dl-conn-val').textContent = String(p.downloadConnections);
+  $<HTMLSelectElement>('dl-max').value = String(p.maxDownloads);
+  $('dl-torrents').setAttribute('aria-checked', String(p.torrents));
+  $('dl-torrents-text').textContent = p.torrents ? 'ON' : 'OFF';
   $<HTMLSelectElement>('vid-quality').value = String(p.videoQuality);
   $('vid-subs').setAttribute('aria-checked', String(p.videoSubtitles));
   $('vid-subs-text').textContent = p.videoSubtitles ? 'ON' : 'OFF';
@@ -178,6 +254,10 @@ $('dl-ask').addEventListener('click', () =>
 const connSlider = $<HTMLInputElement>('dl-conn');
 connSlider.addEventListener('input', () => ($('dl-conn-val').textContent = connSlider.value));
 connSlider.addEventListener('change', () => bro.setPrefs({ downloadConnections: Number(connSlider.value) }));
+$('dl-max').addEventListener('change', () => bro.setPrefs({ maxDownloads: Number($<HTMLSelectElement>('dl-max').value) }));
+$('dl-torrents').addEventListener('click', () =>
+  bro.setPrefs({ torrents: $('dl-torrents').getAttribute('aria-checked') !== 'true' }),
+);
 startupRadios.forEach((r) =>
   r.addEventListener('change', () => {
     if (r.checked) bro.setPrefs({ startup: r.value as Prefs['startup'] });

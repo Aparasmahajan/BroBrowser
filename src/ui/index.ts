@@ -196,20 +196,30 @@ function render(tabs: TabState[]): void {
     forward.disabled = !activeTab.canGoForward;
     const canBookmark = !!activeTab.url;
     bookmarkBtn.disabled = !canBookmark;
-    bookmarkBtn.textContent = activeTab.bookmarked ? '★' : '☆'; // filled vs outline star
-    bookmarkBtn.classList.toggle('on', activeTab.bookmarked);
+    bookmarkBtn.classList.toggle('on', activeTab.bookmarked); // filled star
+    bookmarkBtn.title = activeTab.bookmarked ? 'Edit bookmark — click to remove (Ctrl/Cmd+D)' : 'Bookmark this page (Ctrl/Cmd+D)';
     const zoom = Math.round(activeTab.zoom * 100);
     zoomBtn.hidden = zoom === 100;
     omnibox.classList.toggle('zoomed', zoom !== 100); // room for the badge
     zoomBtn.textContent = `${zoom}%`;
-    // "Save for offline" lights up when the page has played a video.
+    // "Save for offline" works on any web page (the menu says what it can do); a small dot
+    // says a video was found. It is never greyed out — Bro's own pages just have nothing to save.
     const offline = $<HTMLButtonElement>('btn-offline');
-    offline.disabled = !/^https?:/i.test(activeTab.url);
+    const web = /^https?:/i.test(activeTab.url);
     offline.classList.toggle('has-video', activeTab.hasVideo);
+    offline.classList.toggle('idle', !web);
     offline.title = activeTab.hasVideo
       ? 'Video found — save this page and its video for offline (Ctrl/Cmd+S)'
-      : 'Save for offline: this page and its video (Ctrl/Cmd+S)';
+      : web
+        ? 'Save this page (and any video on it) for offline (Ctrl/Cmd+S)'
+        : 'Save for offline — open a web page to save it';
   }
+}
+
+/** Fill a toolbar progress ring: 0–1, or null for "busy, size unknown" (spins). */
+function setRing(ring: Element, fraction: number | null): void {
+  ring.classList.toggle('spin', fraction === null);
+  (ring as SVGElement).style.setProperty('--p', String(fraction === null ? 25 : Math.max(2, Math.min(100, fraction * 100))));
 }
 
 bro.onTabsChanged(render);
@@ -231,16 +241,22 @@ void bro.getProfiles().then(renderProfiles);
 let knownDownloads = new Set<string>();
 function renderDownloads(list: DownloadInfo[]): void {
   const btn = $('btn-downloads');
-  btn.hidden = list.length === 0;
   const active = list.filter((d) => d.status === 'downloading');
+  const queued = list.filter((d) => d.status === 'queued').length;
   const badge = $('dl-badge');
-  badge.hidden = active.length === 0;
-  badge.textContent = String(active.length);
-  const total = active.reduce((a, d) => a + Math.max(0, d.total), 0);
-  const got = active.reduce((a, d) => a + d.received, 0);
-  const bar = $('dl-progress');
-  bar.hidden = active.length === 0 || total <= 0;
-  bar.style.width = total > 0 ? `${Math.min(100, (got / total) * 100)}%` : '0';
+  badge.hidden = active.length + queued === 0;
+  badge.textContent = String(active.length + queued);
+  // Chrome-style ring around the icon: overall progress of what's running.
+  const sized = active.filter((d) => d.total > 0);
+  const total = sized.reduce((a, d) => a + d.total, 0);
+  const got = sized.reduce((a, d) => a + d.received, 0);
+  const ring = $('dl-ring');
+  ring.toggleAttribute('hidden', active.length === 0);
+  setRing(ring, total > 0 ? got / total : null);
+  btn.classList.toggle('busy', active.length > 0);
+  btn.title = active.length || queued
+    ? `Downloads — ${active.length} downloading${queued ? `, ${queued} queued` : ''} (Ctrl/Cmd+J)`
+    : 'Downloads (Ctrl/Cmd+J)';
   // A new download started: draw the eye to the button.
   const fresh = list.some((d) => !knownDownloads.has(d.id));
   if (fresh && knownDownloads.size + list.length > 0 && btn.dataset.ready) {
@@ -262,9 +278,10 @@ function renderOffline(list: OfflineItem[]): void {
   badge.hidden = active.length === 0;
   badge.textContent = String(active.length);
   const cur = list.find((o) => o.status === 'working');
-  const bar = $('off-progress');
-  bar.hidden = !cur || cur.total <= 0;
-  bar.style.width = cur && cur.total > 0 ? `${Math.min(100, (cur.received / cur.total) * 100)}%` : '0';
+  const ring = $('off-ring');
+  ring.toggleAttribute('hidden', !cur);
+  setRing(ring, cur && cur.total > 0 ? cur.received / cur.total : null);
+  btn.classList.toggle('busy', !!cur);
   if (list.some((o) => !knownOffline.has(o.id)) && btn.dataset.ready) {
     btn.classList.remove('pulse');
     void btn.offsetWidth;
