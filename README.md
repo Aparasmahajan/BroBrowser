@@ -107,6 +107,23 @@ npm run dev        # build + launch with logging
 npm run typecheck  # tsc --noEmit (strict)
 ```
 
+### Netflix & other DRM video (Widevine)
+
+Bro runs on [castlabs' Electron build](https://github.com/castlabs/electron-releases), which
+adds Google's Widevine CDM (downloaded on first launch). Its `electron.exe` only carries a
+*development* VMP signature, and Netflix refuses that (titles fail with E100 / M7701-…). Sign it
+for production with a free castlabs EVS account, once per machine:
+
+```bash
+npm run vmp -- signup   # create the EVS account (e-mail + password, interactive)
+npm run vmp             # sign node_modules/electron/dist — redo after electron is reinstalled
+npm run vmp -- verify   # "development only" = not signed yet
+```
+
+The script uses `py`/`python` when there is one, otherwise sets up a private Python in
+`%LOCALAPPDATA%ro-devpython`. Packaging signs the app itself (`build/after-pack.cjs`);
+`BRO_SKIP_VMP=1` packs without signing.
+
 ### Packaging
 
 ```bash
@@ -115,7 +132,8 @@ npm run dist:win   # Windows NSIS installer + portable .exe
 npm run dist:mac   # macOS .dmg + .zip (must run on a Mac; signing/notarization via env)
 ```
 
-Config is in [`electron-builder.yml`](./electron-builder.yml). macOS notarization
+Config is in [`electron-builder.yml`](./electron-builder.yml). Packaging VMP-signs the app
+(needs the EVS account above, or `BRO_SKIP_VMP=1`). macOS notarization
 needs an Apple Developer account (`APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`,
 `APPLE_TEAM_ID` + flip `notarize`). Auto-update (`electron-updater`) reads the
 `publish` config — point it at your real release host before shipping. Add app

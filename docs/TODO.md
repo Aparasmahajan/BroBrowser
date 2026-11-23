@@ -9,6 +9,10 @@ _Nothing right now._
 
 ## Needs a decision or input from the owner
 
+- [ ] **Netflix: castlabs EVS account** — Widevine is in (castlabs Electron), but Netflix only licenses
+  production-VMP-signed builds. Owner: `npm run vmp -- signup` once, then `npm run vmp` (and after
+  every electron reinstall); packaging signs automatically. Then test a real title (not done: the
+  test profile's titles all stopped at the licence, E100, as expected for a development signature).
 - [ ] **Version control** — folder is not a git repo yet (offered `git init`).
 - [ ] **App icons** — need a ≥256×256 image → `build/icon.ico` / `build/icon.icns`.
 - [ ] **Auto-update host** — `publish.url` in `electron-builder.yml` is a placeholder.
@@ -38,7 +42,7 @@ _Nothing right now._
   - [ ] Cancelling a *paused* torrent keeps its partial files (only a running one is deleted).
   - [ ] Real-world swarm not tested on this network (BitTorrent traffic seems blocked here: no
         peers for a public torrent); tested end to end with a local tracker + seeder.
-  - [ ] Packaging: check `npm run pack` keeps `utp-native`'s prebuilt `.node` outside the asar.
+  - [x] 2026-10-14 Packaging: `.node` prebuilds land in app.asar.unpacked; the packed app started a torrent.
 
 - [ ] **Save for offline — follow-ups** (feature done 2026-10-13, see Done):
   - [ ] Pick which video when a page has several streams (today: yt-dlp's choice, else manifests
@@ -78,6 +82,7 @@ _Nothing right now._
   only `winCodeSign-2.6.0` is needed.
 
 ## Done
+
 
 - [x] 2026-10-13 Chrome-style Settings and Library/Downloads pages (header search, side nav, cards,
   switches; downloads grouped by day with file-type tiles, priority menu, "New download" box for

@@ -20,6 +20,14 @@ files:
   - dist/**/*
   - package.json
 
+# Electron is castlabs' build with Widevine (Netflix & other DRM video). Package the binary that
+# npm installed instead of downloading upstream Electron, then VMP-sign it for production.
+electronDist: node_modules/electron/dist
+afterPack: build/after-pack.cjs
+# The native modules (WebTorrent's utp-native, ws's bufferutil/utf-8-validate) ship prebuilt
+# Node-API binaries that load in Electron as they are; rebuilding needs Visual Studio.
+npmRebuild: false
+
 asar: true
 # These packages resolve their own preload/module paths at runtime via
 # require.resolve()/createRequire(), so they must stay UNPACKED from the asar.

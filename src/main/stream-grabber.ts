@@ -16,7 +16,8 @@ import { extname, join } from 'node:path';
  *    disk are kept, so a retry continues where it stopped.
  *  - Plain files: one connection, resumed with a Range request.
  *
- * DRM (Widevine/FairPlay/SAMPLE-AES) and live streams are refused.
+ * DRM (Widevine/PlayReady/FairPlay/SAMPLE-AES) and live streams are refused: Bro only
+ * saves video that isn't encrypted for a licensed player.
  */
 
 export interface GrabContext {

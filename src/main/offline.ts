@@ -42,6 +42,15 @@ interface Media {
   size: number;
 }
 
+/** The page's <video>/<audio> elements when Save was pressed (only explains a failed save). */
+interface PageProbe {
+  media: number;
+  /** Played from a blob: URL — a streaming player (Media Source Extensions). */
+  streamed: number;
+  /** Has EME keys attached (mediaKeys): the player is set up for DRM — not proof every stream is encrypted. */
+  encrypted: number;
+}
+
 interface Rec extends OfflineItem {
   partition: string;
   quality: number;
@@ -50,6 +59,7 @@ interface Rec extends OfflineItem {
   media: Media[];
   /** The exact video that was right-clicked, tried first. */
   mediaUrl?: string;
+  page?: PageProbe;
   userAgent?: string;
   /** Use the OS certificate store (networks that inspect TLS). */
   systemCerts?: boolean;
@@ -81,6 +91,11 @@ interface Job {
 }
 
 const NO_VIDEO = 'No video Bro can save was found here. Press play on the video, wait a few seconds, then save again.';
+const DRM = 'This video is DRM-protected (copy-protected), so Bro can’t save it. If the service offers downloads, use its own app to watch offline.';
+const EME = 'This page plays its video with copy protection (DRM), and Bro found no unprotected copy to save. If the service offers downloads, use its own app to watch offline.';
+const STREAMED = 'The player streams this video in pieces Bro doesn’t recognise (no video file or HLS/DASH playlist was seen), so there is nothing it can save.';
+/** BRO_DEBUG_MEDIA=1: log what the sniffer sees and decides (addresses without their query, which can hold tokens). */
+const DEBUG_MEDIA = !!process.env.BRO_DEBUG_MEDIA;
 /** What download tools hear from bot walls and expired links. */
 const BLOCKED = /HTTP Error 40[13]|\b40[13]\b|Forbidden|Unauthorized|cloudflare|captcha|confirm you.re not a bot|Sign in to confirm/i;
 
@@ -101,6 +116,8 @@ export class OfflineManager {
   private readonly recs = new Map<string, Rec>();
   /** webContents id → streams seen on its current page. */
   private readonly found = new Map<number, Media[]>();
+  /** Save id → its page probe, taken when Save was pressed. */
+  private readonly probes = new Map<string, Promise<PageProbe | null>>();
   private readonly sessions = new Map<string, Session>();
   private readonly timers = new Map<string, NodeJS.Timeout>();
   private running: Job | null = null;
@@ -156,6 +173,7 @@ export class OfflineManager {
     const wcId = d.webContentsId;
     if (wcId == null || d.statusCode >= 400) return;
     const kind = mediaKind(d.url, header(d.responseHeaders, 'content-type'));
+    if (DEBUG_MEDIA) debugResponse(d, kind);
     if (!kind) return;
     const range = /\/(\d+)\s*$/.exec(header(d.responseHeaders, 'content-range') ?? '');
     const size = range ? Number(range[1]) : Number(header(d.responseHeaders, 'content-length') ?? -1);
@@ -218,6 +236,7 @@ export class OfflineManager {
       r.note = 'No video was playing on this page, so only the page was saved. Press play, then save again to get the video.';
     }
     this.recs.set(r.id, r);
+    if (r.what !== 'page') this.probes.set(r.id, probePage(wc).then((p) => (p && (r.page = p), p)));
     this.changed(true);
     if (r.what !== 'video' && r.what !== 'playlist') void this.snapshot(r, wc);
     else this.pump();
@@ -374,9 +393,7 @@ export class OfflineManager {
 
       const outcome = await this.fetchVideos(r, job);
       if (job.stopped || outcome === 'stopped') return;
-      if (outcome === 'drm') {
-        return this.fail(r, 'This video is DRM-protected (copy-protected), so it can’t be saved. Use the site’s own app to watch it offline.');
-      }
+
       if (outcome === 'network') return this.interrupted(r);
       if (outcome !== 'ok') {
         const why = r.error ?? NO_VIDEO;
@@ -419,11 +436,13 @@ export class OfflineManager {
         if (job.stopped) return 'stopped';
         r.error = undefined;
         const out = t.how === 'browser' ? await this.browserGrab(r, t.url, t.kind, job) : await this.ytdlpTries(r, t.url, t.page, cookies);
-        if (out === 'ok' || out === 'stopped' || out === 'drm') return out;
+        if (out === 'ok' || out === 'stopped') return out;
         seen.push(out);
         if (r.error) errors.push(r.error);
       }
       if (seen.includes('network')) return 'network';
+      await this.probes.get(r.id);
+      this.probes.delete(r.id);
       r.error = explain(r, seen, errors);
       return seen.every((s) => s === 'none') ? 'none' : 'error';
     } finally {
@@ -777,6 +796,7 @@ export class OfflineManager {
   // --- Finishing --------------------------------------------------------------------
 
   private async finish(r: Rec): Promise<void> {
+    this.probes.delete(r.id);
     try {
       const videos = await mediaFiles(r.folder);
       r.videos = videos.length;
@@ -1114,6 +1134,10 @@ function explain(r: Rec, seen: Outcome[], errors: string[]): string {
   const all = errors.join('\n');
   const played = r.media.length > 0 || !!r.mediaUrl;
   if (seen.includes('live')) return 'This is a live stream — it can be saved once it has ended.';
+  // Only when nothing else could be saved: a protected stream doesn't make the page's other videos protected.
+  if (seen.includes('drm')) return DRM;
+  if (!played && r.page?.encrypted) return EME;
+  if (!played && r.page?.streamed) return STREAMED;
   if (r.what === 'playlist') {
     return `This site doesn’t let Bro save the whole course at once${all ? ` (${shortError(errors.at(-1) ?? '')})` : ''}. Open each lesson, press play, then press Ctrl+S — every lesson is saved on its own.`;
   }
@@ -1125,6 +1149,37 @@ function explain(r: Rec, seen: Outcome[], errors: string[]): string {
   if (/\b(404|410)\b/.test(all)) return 'The link to the video has expired. Reload the page, press play, then save again.';
   if (!played) return NO_VIDEO;
   return errors.length ? `The video couldn’t be saved: ${shortError(errors.at(-1)!)}` : NO_VIDEO;
+}
+
+/**
+ * Read-only look at the media elements in every frame of the page: streaming player (blob: source)?
+ * EME keys attached? Runs in the page's own world (where mediaKeys is visible); changes nothing.
+ */
+const PROBE_JS = `[...document.querySelectorAll('video, audio')].map((m) => ({ streamed: m.currentSrc.startsWith('blob:'), encrypted: m.mediaKeys != null }))`;
+
+async function probePage(wc: WebContents): Promise<PageProbe | null> {
+  try {
+    const perFrame = await Promise.all(
+      wc.mainFrame.framesInSubtree.map((f) =>
+        Promise.race([
+          f.executeJavaScript(PROBE_JS).catch(() => []) as Promise<{ streamed: boolean; encrypted: boolean }[]>,
+          new Promise<[]>((r) => setTimeout(() => r([]), 2000)),
+        ]),
+      ),
+    );
+    const all = perFrame.flat();
+    return { media: all.length, streamed: all.filter((m) => m.streamed).length, encrypted: all.filter((m) => m.encrypted).length };
+  } catch {
+    return null;
+  }
+}
+
+/** BRO_DEBUG_MEDIA: one line per media-like response — what it was and what the sniffer made of it. */
+function debugResponse(d: OnResponseStartedListenerDetails, kind: Media['kind'] | null): void {
+  const type = header(d.responseHeaders, 'content-type') ?? '';
+  if (!kind && !/^(video|audio)\/|octet-stream|mpegurl|dash|mp4/i.test(type)) return;
+  const size = header(d.responseHeaders, 'content-range') ?? header(d.responseHeaders, 'content-length') ?? '?';
+  console.log(`[bro media] tab ${d.webContentsId} ${d.statusCode} ${kind ?? 'ignored'} type=${type || '-'} size=${size} ${stripQuery(d.url)}`);
 }
 
 /** yt-dlp's errors carry a "[site] id:" prefix and a "(caused by …)" tail — keep the readable part. */
