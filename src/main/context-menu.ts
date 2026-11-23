@@ -9,12 +9,13 @@ import {
   type WebContents,
 } from 'electron';
 import type { TabContext } from './tabs';
-import type { Profile } from '../shared/ipc-contract';
+import type { OfflineWhat, Profile } from '../shared/ipc-contract';
 
 export interface ContextMenuDeps {
   window: BrowserWindow;
   openTab(url: string, opts: { private?: boolean; profileId?: string; background?: boolean }): void;
   saveAs(url: string, wc: WebContents): void;
+  saveOffline(wc: WebContents, what: OfflineWhat, mediaUrl?: string): void;
   /** Omnibox resolution (keywords, default engine, bare domains). */
   resolve(text: string): string;
   searchEngineName(): string;
@@ -58,13 +59,18 @@ export function showTabContextMenu(wc: WebContents, params: ContextMenuParams, c
       { label: 'Copy image address', click: () => clipboard.writeText(src) },
     );
     sep();
-  } else if ((params.mediaType === 'video' || params.mediaType === 'audio') && src && !src.startsWith('blob:')) {
+  } else if (params.mediaType === 'video' || params.mediaType === 'audio') {
     const kind = params.mediaType;
-    items.push(
-      { label: `Open ${kind} in new tab`, click: () => deps.openTab(src, { ...here, background: true }) },
-      { label: `Save ${kind} as…`, click: () => deps.saveAs(src, wc) },
-      { label: `Copy ${kind} address`, click: () => clipboard.writeText(src) },
-    );
+    // Streaming players hand the element a blob: URL — the page itself is what can be saved then.
+    const direct = !!src && !src.startsWith('blob:');
+    items.push({ label: `Save ${kind} for offline`, click: () => deps.saveOffline(wc, 'video', direct ? src : undefined) });
+    if (direct) {
+      items.push(
+        { label: `Open ${kind} in new tab`, click: () => deps.openTab(src, { ...here, background: true }) },
+        { label: `Save ${kind} as…`, click: () => deps.saveAs(src, wc) },
+        { label: `Copy ${kind} address`, click: () => clipboard.writeText(src) },
+      );
+    }
     sep();
   }
 
@@ -93,6 +99,7 @@ export function showTabContextMenu(wc: WebContents, params: ContextMenuParams, c
     sep();
     const page = wc.getURL();
     if (/^https?:/i.test(page)) {
+      items.push({ label: 'Save page + video for offline', click: () => deps.saveOffline(wc, 'page+video') });
       items.push({ label: 'Save page as…', click: () => deps.saveAs(page, wc) });
       items.push({ label: 'View page source', click: () => deps.openTab(`view-source:${page}`, here) });
     }

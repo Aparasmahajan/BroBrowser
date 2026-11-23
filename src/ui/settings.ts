@@ -1,7 +1,7 @@
 // Settings page (its own overlay view): privacy + appearance switches, startup,
 // search engines, the keyboard-shortcut editor and data import/export. Uses
 // the privileged `window.bro` bridge.
-import { PROFILE_COLORS, type AdblockStats, type Prefs, type ProfilesState, type SearchConfig, type SearchEngine } from '../shared/ipc-contract';
+import { PROFILE_COLORS, type AdblockStats, type Prefs, type ProfilesState, type SearchConfig, type SearchEngine, type VideoToolsState } from '../shared/ipc-contract';
 import { codeToKey, formatAccel, isValidBinding, toAccelerator } from '../shared/keys';
 import { DEFAULT_SEARCH, engineProblem } from '../shared/search';
 import {
@@ -141,7 +141,32 @@ function renderPrefs(p: Prefs): void {
   $('dl-ask-text').textContent = p.askWhereToSave ? 'ON' : 'OFF';
   $<HTMLInputElement>('dl-conn').value = String(p.downloadConnections);
   $('dl-conn-val').textContent = String(p.downloadConnections);
+  $<HTMLSelectElement>('vid-quality').value = String(p.videoQuality);
+  $('vid-subs').setAttribute('aria-checked', String(p.videoSubtitles));
+  $('vid-subs-text').textContent = p.videoSubtitles ? 'ON' : 'OFF';
 }
+$('vid-quality').addEventListener('change', () => bro.setPrefs({ videoQuality: Number($<HTMLSelectElement>('vid-quality').value) }));
+$('vid-subs').addEventListener('click', () =>
+  bro.setPrefs({ videoSubtitles: $('vid-subs').getAttribute('aria-checked') !== 'true' }),
+);
+
+// --- Video tools (yt-dlp + ffmpeg) --------------------------------------------
+function renderVideoTools(s: VideoToolsState): void {
+  const btn = $<HTMLButtonElement>('vt-install');
+  const detail = $('vt-detail');
+  btn.disabled = s.installing;
+  btn.textContent = s.installing ? `Downloading… ${Math.round(s.progress * 100)}%` : s.ready ? 'Update' : 'Download now';
+  btn.title = s.ready ? 'Get the newest yt-dlp — do this when a site stops working' : '';
+  detail.textContent = s.error
+    ? `Couldn’t get the tools: ${s.error}`
+    : s.ready
+      ? `Installed${s.ytdlpVersion ? ` (yt-dlp ${s.ytdlpVersion})` : ''}. If a site stops working, press Update — sites change and yt-dlp follows them.`
+      : 'yt-dlp finds the video on thousands of sites; ffmpeg turns any format into one that plays. About 50 MB, fetched once (or on your first video save).';
+  detail.classList.toggle('err', !!s.error);
+}
+$('vt-install').addEventListener('click', () => bro.installVideoTools());
+bro.onVideoToolsChanged(renderVideoTools);
+void bro.getVideoTools().then(renderVideoTools);
 $('dl-dir-change').addEventListener('click', async () => {
   const dir = await bro.chooseDownloadDir();
   if (dir) bro.setPrefs({ downloadDir: dir });

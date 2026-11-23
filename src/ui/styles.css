@@ -184,6 +184,7 @@ body.settings { background: color-mix(in srgb, var(--bg) 92%, transparent); disp
 .group { padding: 14px 0; border-top: 1px solid var(--border); }
 .group:first-of-type { border-top: 0; }
 .group h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); margin: 0 0 10px; }
+.group h3.subhead { font-size: 13px; font-weight: 600; color: var(--text); margin: 18px 0 6px; }
 
 .row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 6px 0; }
 .row-label strong { display: block; font-size: 14px; }
@@ -328,6 +329,10 @@ body.private-active browser-action-list { display: none; }
 .profile-btn:hover { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); }
 .tab.profiled { box-shadow: inset 3px 0 0 var(--profile); }
 .dl-btn { position: relative; }
+.offline-btn.has-video { color: var(--accent); }
+.offline-btn.has-video::after {
+  content: ''; position: absolute; top: 4px; left: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+}
 .dl-badge {
   position: absolute; top: 1px; right: 1px; min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px;
   background: var(--accent); color: #fff; font-size: 10px; line-height: 15px; font-weight: 700;

@@ -88,6 +88,7 @@ export const COMMANDS = [
   { id: 'page.print', label: 'Print', group: 'page', keys: ['CommandOrControl+P'] },
   { id: 'page.viewSource', label: 'View page source', group: 'page', keys: ['CommandOrControl+U'] },
   { id: 'page.devtools', label: 'Developer tools', group: 'page', keys: ['F12', 'CommandOrControl+Shift+I'] },
+  { id: 'page.saveOffline', label: 'Save page + video for offline', group: 'page', keys: ['CommandOrControl+S'] },
 
   // --- App -----------------------------------------------------------------
   { id: 'app.bookmark', label: 'Bookmark this page', group: 'app', keys: ['CommandOrControl+D'] },

@@ -7,6 +7,8 @@ import {
   type FindPayload,
   type NavigatePayload,
   type DownloadAction,
+  type OfflineAction,
+  type OfflineWhat,
   type Prefs,
   type SearchConfig,
 } from '../shared/ipc-contract';
@@ -137,4 +139,18 @@ export function registerIpc(mw: MainWindow, browser: Browser): void {
     const r = await dialog.showOpenDialog(mw.win, { title: 'Download folder', properties: ['openDirectory', 'createDirectory'] });
     return r.canceled || !r.filePaths[0] ? null : r.filePaths[0];
   });
+
+  // Save for offline + video tools.
+  const whats: OfflineWhat[] = ['page+video', 'video', 'page', 'playlist'];
+  ipcMain.on(Channel.ShowOfflineMenu, () => browser.showOfflineMenu());
+  ipcMain.on(Channel.SaveOffline, (_e, what: OfflineWhat) => {
+    if (whats.includes(what)) browser.saveOffline(what);
+  });
+  ipcMain.handle(Channel.GetOffline, () => browser.offline.list());
+  ipcMain.on(Channel.OfflineCommand, (_e, p: { id: string; action: OfflineAction }) =>
+    browser.offline.command(String(p.id), p.action),
+  );
+  ipcMain.on(Channel.ClearOffline, () => browser.offline.clear());
+  ipcMain.handle(Channel.GetVideoTools, () => browser.videoTools.getState());
+  ipcMain.on(Channel.InstallVideoTools, () => void browser.videoTools.install().catch(() => {})); // errors land in the state
 }

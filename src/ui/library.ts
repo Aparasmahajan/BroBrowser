@@ -8,6 +8,8 @@ import {
   type HistoryEntry,
   type ProfilesState,
   type LibraryView,
+  type OfflineAction,
+  type OfflineItem,
   type SavedSession,
 } from '../shared/ipc-contract';
 
@@ -23,6 +25,7 @@ let bookmarks: Bookmark[] = [];
 let history: HistoryEntry[] = [];
 let sessions: SavedSession[] = [];
 let downloads: DownloadInfo[] = [];
+let offline: OfflineItem[] = [];
 let profiles: ProfilesState | null = null;
 let filter = '';
 
@@ -37,10 +40,13 @@ const viewTabs: Record<LibraryView, HTMLElement> = {
   history: $('tab-history'),
   sessions: $('tab-sessions'),
   downloads: $('tab-downloads'),
+  offline: $('tab-offline'),
 };
 const clearDownloadsBtn = $<HTMLButtonElement>('clear-downloads');
 const profileNote = $('profile-note');
 clearDownloadsBtn.addEventListener('click', () => bro.clearDownloads());
+const clearOfflineBtn = $<HTMLButtonElement>('clear-offline');
+clearOfflineBtn.addEventListener('click', () => bro.clearOffline());
 
 // --- Header controls -------------------------------------------------------
 $('close').addEventListener('click', () => bro.closeLibrary());
@@ -69,6 +75,7 @@ function setView(v: LibraryView): void {
   for (const [k, el] of Object.entries(viewTabs)) el.classList.toggle('active', k === v);
   clearBtn.hidden = v !== 'history';
   clearDownloadsBtn.hidden = v !== 'downloads';
+  clearOfflineBtn.hidden = v !== 'offline';
   saveForm.hidden = v !== 'sessions';
   render();
 }
@@ -130,6 +137,7 @@ function rows(): Row[] {
 function render(): void {
   renderProfileNote();
   if (view === 'downloads') return renderDownloads();
+  if (view === 'offline') return renderOffline();
   const list = rows();
   listEl.replaceChildren();
   emptyEl.hidden = list.length > 0;
@@ -293,6 +301,108 @@ function renderDownloads(): void {
   }
 }
 
+// --- Offline (saved pages + videos) ------------------------------------------
+
+function offlineLine(o: OfflineItem): string {
+  switch (o.status) {
+    case 'working': {
+      const parts = [o.stage];
+      if (o.total > 0 && o.total !== 1000) parts.push(`${fmtBytes(o.received)} of ${fmtBytes(o.total)}`);
+      else if (o.total === 1000) parts.push(`${Math.round(o.received / 10)}%`);
+      else if (o.received > 0) parts.push(fmtBytes(o.received));
+      if (o.speed > 0) parts.push(`${fmtBytes(o.speed)}/s`);
+      if (o.eta > 0) parts.push(`${fmtTime(o.eta)} left`);
+      return parts.join(' · ');
+    }
+    case 'queued':
+      return 'Waiting for the save before it to finish';
+    case 'paused':
+      return o.stage && o.stage !== 'Paused' ? `Paused · ${o.stage}` : 'Paused — Resume continues where it stopped';
+    case 'interrupted':
+      return o.stage;
+    case 'completed':
+      return `${o.stage} · ${timeAgo(o.finished ?? o.started)}`;
+    case 'cancelled':
+      return 'Cancelled';
+    case 'failed':
+      return `Failed · ${o.error ?? 'unknown error'}`;
+  }
+}
+
+function renderOffline(): void {
+  const list = offline.filter((o) => !filter || o.title.toLowerCase().includes(filter) || o.pageUrl.toLowerCase().includes(filter));
+  listEl.replaceChildren();
+  emptyEl.hidden = list.length > 0;
+  emptyEl.textContent = filter
+    ? 'Nothing matches.'
+    : 'Nothing saved yet. On any page with a video (a course, a talk, a tutorial), press Ctrl/Cmd+S or the ' +
+      'Save for offline button next to Downloads. Bro keeps the page and the video in your Downloads folder ' +
+      'under “Bro Offline”, and you can watch it here without internet.';
+  for (const o of list) {
+    const row = document.createElement('div');
+    row.className = `dl-item dl-${o.status === 'working' || o.status === 'queued' ? 'downloading' : o.status}`;
+    row.dataset.id = o.id;
+
+    const done = o.status === 'completed';
+    const name = document.createElement(done ? 'button' : 'span');
+    name.className = 'dl-name';
+    name.textContent = o.title;
+    name.title = `${o.pageUrl}
+${o.folder}`;
+    if (done) name.addEventListener('click', () => bro.offlineAction(o.id, 'open'));
+
+    const meta = document.createElement('span');
+    meta.className = 'dl-meta';
+    meta.textContent = offlineLine(o) + (o.private ? ' · private' : '');
+    meta.title = meta.textContent;
+
+    const main = document.createElement('div');
+    main.className = 'dl-main';
+    main.append(name, meta);
+    if (o.status === 'working') {
+      const bar = document.createElement('div');
+      bar.className = 'dl-bar';
+      const fill = document.createElement('div');
+      fill.className = 'dl-fill';
+      if (o.total > 0) fill.style.width = `${Math.min(100, (o.received / o.total) * 100).toFixed(1)}%`;
+      else fill.classList.add('indeterminate');
+      bar.appendChild(fill);
+      main.appendChild(bar);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'dl-actions';
+    const act = (label: string, action: OfflineAction, title = label) => {
+      const b = document.createElement('button');
+      b.className = 'text-btn small';
+      b.textContent = label;
+      b.title = title;
+      b.dataset.action = action;
+      b.addEventListener('click', () => {
+        if (action === 'delete' && !confirm(`Delete “${o.title}” and its saved files from your computer?`)) return;
+        bro.offlineAction(o.id, action);
+      });
+      actions.appendChild(b);
+    };
+    if (o.status === 'working' || o.status === 'queued') {
+      act('Pause', 'pause');
+      act('Cancel', 'cancel');
+    } else if (o.status === 'paused' || o.status === 'interrupted') {
+      act('Resume', 'resume');
+      act('Cancel', 'cancel');
+    } else if (done) {
+      act(o.videos ? 'Watch' : 'Open', 'open');
+      act('Show folder', 'show');
+      act('Delete', 'delete', 'Delete the saved files');
+    } else {
+      act('Retry', 'retry');
+    }
+    act('✕', 'remove', 'Remove from list (keeps the files)');
+    row.append(main, actions);
+    listEl.appendChild(row);
+  }
+}
+
 function prettyUrl(u: string): string {
   try {
     return new URL(u).host + new URL(u).pathname.replace(/\/$/, '');
@@ -326,6 +436,16 @@ bro.onDownloadsChanged((d) => {
   if (view !== 'downloads') return;
   if (pressing) redrawPending = true;
   else render();
+});
+bro.onOfflineChanged((o) => {
+  offline = o;
+  if (view !== 'offline') return;
+  if (pressing) redrawPending = true;
+  else render();
+});
+void bro.getOffline().then((o) => {
+  offline = o;
+  if (view === 'offline') render();
 });
 bro.onProfilesChanged((p) => {
   profiles = p;

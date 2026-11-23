@@ -13,7 +13,8 @@ _Nothing right now._
 - [ ] **App icons** — need a ≥256×256 image → `build/icon.ico` / `build/icon.icns`.
 - [ ] **Auto-update host** — `publish.url` in `electron-builder.yml` is a placeholder.
 - [ ] **Mac build + signing** — needs a Mac + Apple Developer account.
-- [ ] **Licensing** — `electron-chrome-extensions` is GPL-3.0 (matters if distributed).
+- [ ] **Licensing** — `electron-chrome-extensions` is GPL-3.0 (matters if distributed). The
+  ffmpeg build Bro downloads at runtime is GPL too (fetched by the user, not shipped in Bro).
 
 ## Not built
 
@@ -21,15 +22,40 @@ _Nothing right now._
   uBlock (installed in the dev profile) logs errors because of it. Reinstalling
   the extension does not help. Could be shimmed from `webContents` navigation events.
 
+- [ ] **Download queue + limits** (like Free Download Manager) — requested 2026-10-12:
+  - [ ] Max simultaneous downloads (e.g. 3); extra ones wait in a queue and start automatically.
+  - [ ] Priority per download (High / Normal / Low) + move up/down in the queue; high
+        priority gets connections first.
+  - [ ] Global speed limit (e.g. cap Bro's downloads at 2 MB/s so browsing stays fast) and
+        optional per-download limit.
+  - [ ] Pause all / Resume all; “start queued downloads at a set time” (scheduler).
+  - [ ] Where: `src/main/downloads.ts` (queue + token-bucket throttle in `SegmentedJob`;
+        Chromium-engine items can only be paused/resumed, not throttled), Downloads view
+        controls, Settings → Downloads.
+
+- [ ] **Save for offline — follow-ups** (feature done 2026-10-13, see Done):
+  - [ ] Pick which video when a page has several streams (today: yt-dlp's choice, else manifests
+        in the order the player loaded them, then the biggest file).
+  - [ ] Course lessons all get the course's tab title (Udemy: "Course: … | Udemy"), so folders
+        are "(2)", "(3)"… — read the lesson title from the page instead.
+  - [ ] Browser-path DASH (separate .mpd video/audio) — today only yt-dlp handles DASH.
+  - [ ] Show "Save for offline" progress in the Downloads view too (today: Library → Offline).
+  - [ ] Optional: bundle yt-dlp + ffmpeg into the installer (`extraResources`) for installs with
+        no internet at all; `video-tools.ts` would look there first.
+
 ## Never tested
 
 - [ ] "Save … as" / "Ask where to save" dialogs (native dialogs can't be driven by the tests).
 - [ ] A real mouse right-click (synthetic input is dropped while the screen is locked; every
   menu item was tested through the menu-building path instead).
-- [ ] Downloads queue: no limit on simultaneous downloads yet (FDM has one) — consider.
 - [ ] Export / Import (native file dialogs) and Clear cookies / Clear cache buttons.
 - [ ] Fullscreen requested by a page (video ⛶ button) — tab view may need re-layout.
 - [ ] YouTube shield on music.youtube.com and m.youtube.com (covered by the hostname match).
+- [ ] Save for offline on a real Udemy lecture after the fix (needs the owner's sign-in; the
+  failure was reproduced with a local "bot wall" fixture instead).
+- [ ] Save for offline: a real playlist download end to end (only the file naming was checked with
+  a dry run), private-tab saves, the macOS builds of yt-dlp/ffmpeg, and losing the network
+  mid-save (the retry path is coded; pause/resume and restart-resume were exercised).
 
 ## Watch
 
@@ -43,6 +69,20 @@ _Nothing right now._
   only `winCodeSign-2.6.0` is needed.
 
 ## Done
+
+- [x] 2026-10-13 Fixed: Udemy save failed with "[udemy:course] assets … HTTP 403". The stream the page
+  played was handed to yt-dlp, which mistook `udemy.com/assets/…m3u8` for a course page. Now:
+  streams the page played are fetched **through the tab's own browser session** (`stream-grabber.ts`:
+  HLS incl. AES-128, separate audio, byte ranges; plain files), yt-dlp only gets stream URLs with
+  `--use-extractors generic`, retries as Chrome (`--impersonate chrome`) when refused, and failures
+  are explained in plain words. Also: the master playlist is used (quality choice was ignored).
+  E2E 29/29.
+
+- [x] 2026-10-13 **Save for offline** (Ctrl+S / toolbar button / right-click): page snapshot (MHTML) +
+  video(s) as MP4 + English subtitles + `index.html` offline player (speed, resume, lesson list);
+  yt-dlp + ffmpeg fetched once (~50 MB, checksum-verified); any format converted to something
+  Chromium plays; playlists/courses; quality 360p–1080p / audio only; queue, pause/resume,
+  auto-retry, resumes after restart; Library → Offline; Settings → Downloads. E2E 22/22 + restart.
 
 - [x] 2026-10-12 Right-click menu (links, images, media, selection search, editing, page, extensions, Inspect).
 - [x] 2026-10-12 Download manager: segmented multi-connection, resumable across pause / network drop /

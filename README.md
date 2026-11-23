@@ -27,6 +27,7 @@ out of the box, and **supports Chrome Web Store extensions**.
 | **Private tabs** | Like Incognito: `Ctrl+Shift+N` or the button next to **+**. Private tabs share one in-memory storage area — cookies and site data are wiped when the last one closes. No history, never saved in sessions, links stay private, extensions off, ads still blocked. |
 | **Profiles** | Separate browsers inside Bro (e.g. Work / Personal): each has its own sign-ins and cookies, history, bookmarks and extensions. Profile button in the toolbar; tabs carry their profile's colour; links stay in their profile. |
 | **Downloads** | A download manager built in: big files come down over up to 16 parallel connections, every piece's progress is saved, so downloads survive pauses, network drops, crashes and restarts (and continue by themselves). Downloads list with Ctrl+J; pause/resume/cancel/retry/open/show in folder; choose folder, ask-where, connections in Settings. |
+| **Save for offline** | Ctrl+S (or the button next to Downloads, which lights up when a page plays a video) saves the page *and* its video for watching without internet: a page snapshot (`page.mhtml`), the video(s) as MP4, English subtitles, and an `index.html` player with speed buttons, resume-where-you-stopped and a lesson list. Works on YouTube and 1000s of sites (via yt-dlp), plain video files and HLS/DASH streams; anything a browser can't play is converted (ffmpeg). Whole playlists/courses, quality 360p–1080p or audio only, one save at a time, pause/resume, auto-retry on network loss, continues after a restart. Library → Offline. DRM-protected video can't be saved. |
 | **Right-click menu** | Open link in new / private tab / another profile, Save link/image/page as, Copy image / link, search the selection, spelling suggestions, Inspect, extension items. |
 | **Sessions** | Reopens last time's tabs on launch (they load when clicked, so startup stays fast). Save all open tabs as a **named session** and reopen it later. |
 | **Find & zoom** | Find in page with match count; Chrome's zoom steps with a badge that resets on click; full screen, print, view source, DevTools. |
@@ -71,6 +72,7 @@ shortcuts** (click **+**, press the keys). `Ctrl` is `Cmd` on macOS.
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Zoom in / out / reset |
 | `F11`, `Ctrl+P`, `Ctrl+U`, `F12` | Full screen, print, view source, DevTools |
 | `Ctrl+D`, `Ctrl+Y`, `Ctrl+H`, `Ctrl+J` | Bookmark page, Bookmarks & History, History, Downloads |
+| `Ctrl+S` | Save page + video for offline |
 | `Ctrl+Shift+D` | Save all tabs as a session |
 | `Ctrl+,` | Settings |
 
@@ -152,6 +154,8 @@ src/
 │  ├─ sessions.ts · search.ts · data.ts   # sessions, search engines, backup
 │  ├─ profiles.ts           # profiles: one persistent session each
 │  ├─ downloads.ts          # download manager (segmented, resumable) + Chromium fallback
+│  ├─ offline.ts            # "Save for offline": video sniffing, save queue, offline player page
+│  ├─ video-tools.ts        # fetches + runs yt-dlp and ffmpeg (userData/tools)
 │  ├─ context-menu.ts       # right-click menus
 │  ├─ adblock.ts            # Ghostery blocker (proxy-aware net.fetch, cached)
 │  ├─ library.ts            # bookmarks + history
@@ -188,6 +192,11 @@ src/
   shield (`src/preload/youtube.ts`) may need updating when it does.
 - **Backups don't include cookies or sign-ins** — those stay in Chromium's own
   store on this machine.
+- **Save for offline needs ~50 MB of tools once** (yt-dlp + ffmpeg, fetched into
+  `%APPDATA%\bro-browser\tools` on the first video save, or from Settings → Downloads).
+  When a site stops working, Settings → Downloads → *Update* gets the newest yt-dlp.
+  DRM-protected video (Netflix-style, some paid course apps) can't be saved — Bro says so.
+  Only save what you're allowed to keep (the site's terms apply).
 - **Licensing:** `electron-chrome-extensions` is distributed under **GPL-3.0**
   (the license Bro passes to it). Factor this into any distribution.
 
